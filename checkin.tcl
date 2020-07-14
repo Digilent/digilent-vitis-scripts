@@ -12,6 +12,12 @@ if {[info exists ::create_path]} {
 	set dest_dir [file normalize $script_dir/../src]
 }
 
+if {[info exists ::debug_prevent_fileio]} {
+	set debug_prevent_fileio $::debug_prevent_fileio
+} else {
+	set debug_prevent_fileio 0
+}
+
 puts "INFO: Targeting $dest_dir for export"
 set var_overwrite_ok [dict create]
 
@@ -76,12 +82,24 @@ foreach pf $pf_names {
 	}
 	# For some reason it needs to be made active for report to work
 	platform active $pf
+	set pf_dest [file normalize $dest_dir/$pf/]
 	# Get the xsa
-	set xsa [dict get [platform report -dict $pf] {hw spec}]
-	file copy -force -- "$xsa" $dest_dir/$pf/
-	set pf_subscript $dest_dir/$pf/5_hw_pf_xsa.tcl
-	file copy -force -- $script_dir/sub/hw_pf_xsa.tcl "$pf_subscript"
-	set fid [open "$pf_subscript" a]
+	set xsa [file normalize [dict get [platform report -dict $pf] {hw spec}]]
+	set pf_subscript [file normalize $pf_dest/5_hw_pf_xsa.tcl]
+	
+	if {$debug_prevent_fileio == 0} {
+		# Check if xsa is linked from src already, copy if not
+		if { [file dirname $xsa] ne $pf_dest } {
+			file copy -force -- "$xsa" $pf_dest
+		}
+		file copy -force -- $script_dir/sub/hw_pf_xsa.tcl "$pf_subscript"
+		set fid [open "$pf_subscript" a]
+	} else {
+		puts "TRACE: file copy -force -- \"$xsa\" $pf_dest"
+		puts "TRACE: file copy -force -- $script_dir/sub/hw_pf_xsa.tcl \"$pf_subscript\""
+		set fid stdout
+	}
+	
 	catch {
 		# Export platform config
 		puts $fid "\n"
@@ -90,7 +108,9 @@ foreach pf $pf_names {
 		puts $fid "platform config -extra-compiler-flags pmufw \"[platform config -extra-compiler-flags pmufw]\""
 		puts $fid "platform config -extra-linker-flags pmufw \"[platform config -extra-linker-flags pmufw]\""
 	} result options
-	close $fid
+	if {$debug_prevent_fileio == 0} {
+		close $fid
+	}
 	return -options $options $result
 	
 	# Do the domains
@@ -130,16 +150,20 @@ foreach pf $pf_names {
 		set d_subscript $dest_dir/$d/25_standalone_bsp.tcl
 		puts "INFO: Generating $d_subscript."
 		
-		set dfid [open $d_subscript w]
+		if {$debug_prevent_fileio == 0} {
+			set dfid [open $d_subscript w]
+		} else {
+			set dfid stdout
+		}
 		set sfid [open $script_dir/sub/standalone_bsp.tcl r]
 		catch {
 			# Get domain properties
 			set proc [dict get [domain report -dict $d] {processor}]
-			# Write to subscript's beginning
-			puts $dfid "set proc \"$proc\""
-			# Copy the rest of the subscript
+			set var_map [list <processor>   $proc   \
+						]
+			# Copy the subcript while replacing variables
 			while { [gets $sfid line] >= 0 } {
-				puts $dfid $line
+				puts $dfid [string map $var_map $line]
 			}
 			# Only SOME of the config params possible
 			set bsp_configs {\
@@ -167,16 +191,12 @@ foreach pf $pf_names {
 			}
 			
 		} result options
-		close $dfid
+		if {$debug_prevent_fileio == 0} {
+			close $dfid
+		}
 		close $sfid
 		return -options $options $result
 	}
-}
-
-if {[info exists ::debug_prevent_fileio]} {
-	set debug_prevent_fileio $::debug_prevent_fileio
-} else {
-	set debug_prevent_fileio 0
 }
 
 # Do the applications
@@ -343,3 +363,32 @@ foreach app_name $app_names {
 	}
 	return -options $options $result
 }
+
+# When all sources are checked into src/, copy checkout script and README too
+if {$debug_prevent_fileio == 0} {
+	file copy -force -- [file normalize $script_dir/checkout.tcl] $dest_dir/
+	file copy -force -- [file normalize $script_dir/README.md] [file normalize $dest_dir/]
+	# Attempt to query git HEAD hash
+	if { [catch { set fid [open "|git -C \"$script_dir\" rev-parse HEAD" r] } errmsg] } {
+		puts "WARNING: $errmsg"
+		puts "WARNING: git command cannot be found (not in PATH?), so could not append $dest_dir/README.md with script versioning info."
+	} elseif { [gets $fid hash] eq -1 } {
+		puts "WARNING: git error so could not append $dest_dir/README.md with script versioning info."
+	} else {
+		set dfid [open [file normalize $dest_dir/README.md] a]
+		catch {
+			puts $dfid "\nThis README.md was created by the following commit hash:\n$hash"
+		} result options
+		close $dfid
+		close $fid
+		return -options $options $result
+	}
+}
+
+# Copy cleanup scripts to ws/, which is the default destination for checkout.tcl
+if {$debug_prevent_fileio == 0} {
+	file copy -force -- [file normalize $script_dir/sub/cleanup._sh] [file normalize $dest_dir/../ws/cleanup.sh]
+	file copy -force -- [file normalize $script_dir/sub/cleanup._cmd] [file normalize $dest_dir/../ws/cleanup.cmd]
+}
+
+puts "INFO: Checked in workspace [getws] to $dest_dir"

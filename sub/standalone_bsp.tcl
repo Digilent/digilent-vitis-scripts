@@ -11,6 +11,7 @@ set domain_name [file tail $script_dir]
 # Modify these for custom domain/BSP settings
 set arch "64-bit"
 set os "standalone"
+set proc "<processor>"
 
 domain create -name $domain_name -proc $proc -arch $arch -os $os
 

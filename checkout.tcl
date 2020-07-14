@@ -1,4 +1,4 @@
-# Run this script to create the Vitis workspace in the ws/ sub-directory
+# Run this script to create the Vitis workspace in the <repo>/ws/ sub-directory
 # If ::create_path global variable is set, the project is created under that path instead of ws/
 
 set script [info script] 
@@ -72,6 +72,16 @@ catch {
 	}
 
 	set scripts [deep_traverse $src_dir "*.tcl"]
+	# Self should be there
+	set selfs [lsearch -all $scripts [file normalize $script]]
+	if { [llength $selfs] eq 0 } {
+		return -code error "ERROR: Self not found while deep searching $src_dir"
+	}
+	# Remove all instances of self to avoid recursive call below
+	foreach idx $selfs {
+		set scripts [lreplace $scripts $idx $idx]
+	}
+	# Order by integer prefix
 	set ordered_scripts [lsort -command sort_by_fileprefix $scripts]
 
 	puts "INFO: Found the following subscripts:"
