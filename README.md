@@ -4,15 +4,15 @@ This repository contains a set of scripts for managing Vitis workspaces with git
 ----
 ## Quick Checkout Guide
 
-To clone a repository using these scripts as a submodule (referred to as the parent repository), either clone the parent repository recursively (`git clone --recursive <URL>`), or initialize and update the repository's submodules after cloning (`git submodule update --init` within the repo directory). This is required in order to ensure that submodule sources are fully downloaded, and that the correct versions of those sources are used.
+When cloning this repository, use the command `git clone --recursive <URL>` to pick up any submodules this repository may use to bring in additional source files. Alternatively initialize and update the repository's submodules after cloning (`git submodule update --init` within the repo directory).
 
-Some Digilent Github repositories that use this as a submodule also require that you check out a specific demo branch. In these cases, refer to the parent repository's documentation for additional instructions, upon checking out a demo branch, submodules should be reupdated and reinitialized (`git submodule update --init`, as above).
+Some Digilent Github repositories also require that you check out a specific demo branch. Whenever checking out a demo branch, submodules should be reupdated and reinitialized (`git submodule update --init`, as above).
 
-When launching Vitis, whether through Vivado's *Tools* menu, or on its own, the Vitis workspace should be the parent repository's sw/ws folder.
+When launching Vitis, whether through Vivado's *Tools* menu, or on its own, the Vitis workspace should be set to the repository's sw/ws folder.
 
 The scripts present in this repository can be run through the use of the Xilinx Software Command-Line Tool (XSCT), which is built into Vitis. This tool can be opened within the Vitis GUI through the *Xilinx > XSCT Console* option in the menu bar at the top of the window. Upon launch, XSCT's current working directory is set to the Vitis install directory. To recreate the workspace, enter the following command into the XSCT Console:
 
-`source [getws]/../scripts/checkout.tcl`
+`source [getws]/../src/checkout.tcl`
 
 This process will populate the workspace with projects containing sources from the parent repository's src folder, configure those projects, and fully build them. This may take several minutes to fully complete. When the script is finished running, the `xsct%` prompt wil reappear in the tan XSCT Process pane. From this point, the demo can be programmed onto a board, sources can be viewed, and modified, as desired.
 
@@ -21,7 +21,7 @@ This process will populate the workspace with projects containing sources from t
 ----
 ## Quick Checkin Guide
 
-**Important:** *The checkin.tcl script should generally only be used for the first time checking a project into version control. For further commits, files should be manually moved into the repository's src directory. Application source files (and linker scripts) are soft-linked into the workspace upon checkout, so existing files do not need to be manually copied back.*
+**Important:** *The checkin.tcl script should generally only be used for the first time checking a project into version control. For further commits, new files should be manually copied into the repository's src directory. Application source files (and linker scripts) are soft-linked into the workspace upon checkout, so existing files do not need to be manually copied back. Modifications to project settings require that the corresponding scripts in the repository's src directory be edited.*
 
 This section assumes that you have already created a Vitis workspace containing one or more application projects. Some additional work may be required after the checkin script is completed, and it is important that you try the checkout process afterwards to ensure that all important settings are properly included.
 
@@ -37,6 +37,7 @@ Open your workspace in Vitis. Open the XSCT Console from within the Vitis GUI by
 
 This script will create a src directory in the same folder as the scripts submodule, and populate it as below:
 
+* checkout.tcl script and README file
 * One folder per application project, containing the following:
   * A src directory, containing the application project's local sources (from its src folder) and linker script.
   * A #_standalone_app.tcl script, containing the XSCT commands required to recreate and configure the project.
@@ -46,6 +47,8 @@ This script will create a src directory in the same folder as the scripts submod
 * One folder per hardware platform, containing the following:
   * A #_hw_pf_xsa.tcl script, containing the XSCT commands required to recreate and configure the platform, using only the XSA as input.
   * The XSA file describing the hardware specification that the software targets, exported from Vivado.
+
+Additionally, a gitignore file is created in the parent repository's sw directory.
 
 Note that the name of each folder is used in checkout to determine the name of the app/platform/domain it is used to create.
 

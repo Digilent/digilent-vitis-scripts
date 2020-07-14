@@ -346,7 +346,7 @@ foreach app_name $app_names {
 			if {[file exists $dest_dir/$app_name/src] == 0} {
 				file copy -force -- $appsrc_path $dest_dir/$app_name
 			} else {
-				puts "WARNING $dest_dir/$app_name/src already exists; cannot copy source directory"
+				puts "WARNING: $dest_dir/$app_name/src already exists; cannot copy source directory"
 			}
 		} else {
 			puts "file copy -force -- $appsrc_path $dest_dir/$app_name"
@@ -389,6 +389,24 @@ if {$debug_prevent_fileio == 0} {
 if {$debug_prevent_fileio == 0} {
 	file copy -force -- [file normalize $script_dir/sub/cleanup._sh] [file normalize $dest_dir/../ws/cleanup.sh]
 	file copy -force -- [file normalize $script_dir/sub/cleanup._cmd] [file normalize $dest_dir/../ws/cleanup.cmd]
+}
+
+# Copy template gitignore
+if {$debug_prevent_fileio == 0} {
+	set gitignore [file normalize $dest_dir/../.gitignore]
+	if {[file exists $gitignore] == 0} {
+		set copy_ok 1
+	} else {
+		set input [yes_or_no "WARNING: $gitignore exists, overwrite it? (y/n):"]
+		if { [string equal -nocase -length 1 $input "n"] } {
+			set copy_ok 0
+		} else {
+			set copy_ok 1
+		}
+	}
+	if {$copy_ok} {
+		file copy -force -- [file normalize $script_dir/sub/template.gitignore] $gitignore
+	}
 }
 
 puts "INFO: Checked in workspace [getws] to $dest_dir"
