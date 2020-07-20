@@ -186,8 +186,14 @@ foreach pf $pf_names {
 			exec_mode\
 			extra_compiler_flags\
 			}
+			
 			foreach c $bsp_configs {
-				puts $dfid "bsp config $c \"[bsp config $c]\""
+				set err [catch {set val [bsp config $c]}]
+				if {$err != 0} {
+					puts "WARNING: BSP config parameter $c cannot be read from domain $d"
+				} else {
+					puts $dfid "bsp config $c \"$val\""
+				}
 			}
 			
 		} result options
