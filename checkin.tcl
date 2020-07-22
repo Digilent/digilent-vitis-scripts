@@ -393,6 +393,9 @@ if {$debug_prevent_fileio == 0} {
 
 # Copy cleanup scripts to ws/, which is the default destination for checkout.tcl
 if {$debug_prevent_fileio == 0} {
+	if {[file exists $dest_dir/../ws] == 0} {
+		file mkdir $dest_dir/../ws
+	}
 	file copy -force -- [file normalize $script_dir/sub/cleanup._sh] [file normalize $dest_dir/../ws/cleanup.sh]
 	file copy -force -- [file normalize $script_dir/sub/cleanup._cmd] [file normalize $dest_dir/../ws/cleanup.cmd]
 }
