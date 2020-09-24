@@ -3,6 +3,7 @@
 
 set script [info script] 
 set script_dir [file normalize [file dirname $script]]
+set auto_boot_domain_exists 0
 
 puts "INFO: Running $script."
 
@@ -123,10 +124,11 @@ foreach pf $pf_names {
 			# Get domain properties
 			if { [string first "Auto Generated" [dict get [domain report -dict $d_name] {description}]] >= 0 } {
 				puts "INFO: Skipping $d_name, because it is auto-generated."
+				set auto_boot_domain_exists 1
 				continue;
 			}
 			set os [dict get [domain report -dict $d_name] {os}]
-			if { $os ne "standalone" } {
+			if { $os ne "linux" && $os ne "standalone"} {
 				puts "INFO: Skipping $d_name, because $os OS is not supported."
 				continue;
 			}
@@ -159,7 +161,10 @@ foreach pf $pf_names {
 		catch {
 			# Get domain properties
 			set proc [dict get [domain report -dict $d] {processor}]
-			set var_map [list <processor>   $proc   \
+			set os [dict get [domain report -dict $d] {os}]
+			set var_map [list <os> $os    \
+							  <processor> $proc   \
+							  <auto_boot_domain_exists> $auto_boot_domain_exists  \
 						]
 			# Copy the subcript while replacing variables
 			while { [gets $sfid line] >= 0 } {
@@ -330,8 +335,9 @@ foreach app_name $app_names {
 			puts "WARNING: ${app_name} ${bc}'s library-search-path config will not be set by checkout"
 			
 			# hardcode linker-script link to app src dir
-			puts $outfile "app config -set -name \$app_name linker-script \$script_dir/src/lscript.ld"
-			
+			if { $os ne "linux" } {
+				puts $outfile "app config -set -name \$app_name linker-script \$script_dir/src/lscript.ld"
+			}
 			# -set not supported for undef-compiler-symbols
 			set symbols [app config -get -name $app_name "undef-compiler-symbols"]
 			set symbols [split $symbols ";"]

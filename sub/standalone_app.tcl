@@ -19,14 +19,27 @@ set domain "<domain>"
 set platform "<platform>"
 set sysproj "<sysproj>"
 
+set os [dict get [domain report -dict] os]
+
 # Handle dependent variables
-if {$lang == "c"} {
-	set template "Empty Application"
-} elseif {$lang == "c++"} {
-	set template "Empty Application (C++)"
+if {$os == "linux"} {
+	if {$lang == "c"} {
+		set template "Linux Empty Application"
+	} elseif {$lang == "c++"} {
+		set template "Empty Application (C++)"
+	} else {
+		return -code error "invalid language selection in [file tail $script]; $lang should be c or c++"
+	}
 } else {
-	return -code error "invalid language selection in [file tail $script]; $lang should be c or c++"
+	if {$lang == "c"} {
+		set template "Empty Application"
+	} elseif {$lang == "c++"} {
+		set template "Empty Application (C++)"
+	} else {
+		return -code error "invalid language selection in [file tail $script]; $lang should be c or c++"
+	}
 }
+
 
 
 # unused `app create` arguments:

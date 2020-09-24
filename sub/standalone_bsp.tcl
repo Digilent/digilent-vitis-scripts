@@ -10,9 +10,18 @@ set domain_name [file tail $script_dir]
 
 # Modify these for custom domain/BSP settings
 set arch "64-bit"
-set os "standalone"
+set os "<os>"
 set proc "<processor>"
+set keep_boot_domain "<auto_boot_domain_exists>"
 
 domain create -name $domain_name -proc $proc -arch $arch -os $os
+
+if {$keep_boot_domain == 0} {
+	platform config -remove-boot-bsp
+}
+
+if {$os == "linux"} {
+	platform generate
+}
 
 # Customize BSP, this replaces *.mss file
