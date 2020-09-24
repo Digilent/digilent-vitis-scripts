@@ -12,4 +12,4 @@ puts "INFO: Found $hw_src"
 
 set hw_name [file tail $script_dir]
 
-platform create -name "$hw_name" -hw "$hw_src"
+platform create -name "$hw_name" -hw "$hw_src" -no-boot-bsp

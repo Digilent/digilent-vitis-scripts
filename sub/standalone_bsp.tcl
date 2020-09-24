@@ -16,8 +16,9 @@ set keep_boot_domain "<auto_boot_domain_exists>"
 
 domain create -name $domain_name -proc $proc -arch $arch -os $os
 
-if {$keep_boot_domain == 0} {
-	platform config -remove-boot-bsp
+if {$keep_boot_domain == 1} {
+	platform config -create-boot-bsp
+	platform write
 }
 
 if {$os == "linux"} {
