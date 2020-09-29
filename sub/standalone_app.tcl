@@ -19,7 +19,7 @@ set domain "<domain>"
 set platform "<platform>"
 set sysproj "<sysproj>"
 
-set os [dict get [domain report -dict] os]
+set os [dict get [domain report -dict -name $domain] {os}]
 
 # Handle dependent variables
 if {$os == "linux"} {
