@@ -160,6 +160,7 @@ foreach pf $pf_names {
 			# Get domain properties
 			set proc [dict get [domain report -dict $d] {processor}]
 			set var_map [list <processor>   $proc   \
+                              <platform>    $pf \
 						]
 			# Copy the subcript while replacing variables
 			while { [gets $sfid line] >= 0 } {

@@ -13,6 +13,9 @@ set arch "64-bit"
 set os "standalone"
 set proc "<processor>"
 
+# Destination platform needs to be made active first
+platform active "<platform>"
+
 domain create -name $domain_name -proc $proc -arch $arch -os $os
 
 # Customize BSP, this replaces *.mss file
