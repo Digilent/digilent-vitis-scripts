@@ -32,7 +32,15 @@ if {$lang == "c"} {
 # unused `app create` arguments:
 # -os, -arch, and -proc are inferred from -domain?
 # -hw conflicts with -platform usage
+# -template must be specified, otherwise Hello World by default
 app create -name $app_name -lang $lang -template $template -domain $domain -platform $platform -sysproj $sysproj
+
+# even the "Empty Application" template creates lscript.ld and Readme
+# can cause confusion later when linking linker script
+# delete all files created by the template
+if { [catch {file delete -- {*}[glob -directory [file normalize [getws]/$app_name/src] *]} result] } {
+    puts "INFO: emptying src/ dir after project creation failed with $result"
+}
 
 importsources -name $app_name -path $script_dir/src -soft-link
 
