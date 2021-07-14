@@ -168,45 +168,43 @@ foreach pf $pf_names {
 		set sfid [open $script_dir/sub/standalone_bsp.tcl r]
 		catch {
 			# Get domain properties
+			set os  [dict get [domain report -dict $d] {os}]
+			set arch [dict get [domain report -dict $d] {arch}]
 			set proc [dict get [domain report -dict $d] {processor}]
 			set var_map [list <processor>   $proc   \
                               <platform>    $pf \
+							  <architecture> $arch \
+							  <os> $os \
 						]
 			# Copy the subcript while replacing variables
 			while { [gets $sfid line] >= 0 } {
 				puts $dfid [string map $var_map $line]
 			}
-			# Only SOME of the config params possible
-			set bsp_configs {\
-			clocking\
-			enable_sw_intrusive_profiling\
-			hypervisor_guest\
-			lockstep_mode_debug\
-			microblaze_exceptions\
-			predecode_fpu_exceptions\
-			profile_timer\
-			sleep_timer\
-			stdin\
-			stdout\
-			ttc_select_cntr\
-			zynqmp_fsbl_bsp\
-			archiver\
-			assembler\
-			compiler\
-			compiler_flags\
-			exec_mode\
-			extra_compiler_flags\
-			}
-			
-			foreach c $bsp_configs {
-				set err [catch {set val [bsp config $c]}]
-				if {$err != 0} {
-					puts "WARNING: BSP config parameter $c cannot be read from domain $d"
-				} else {
-					puts $dfid "bsp config $c \"$val\""
+
+			# NOTE: Here we use internal cmds ::json::json2dict and builtin_bsp due to the lack of "bsp listparams -dict"
+			# As such, we have implemented our own.
+
+			# Get os bsp settings
+			foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -os]]] v [dict values [::json::json2dict [builtin_bsp -listparam -os]]] {
+				if {$k != ""} {
+					puts $dfid "bsp config $k \"$v\""
 				}
 			}
-			
+
+			# Get proc bsp settings
+			foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -proc]]] v [dict values [::json::json2dict [builtin_bsp -listparam -proc]]] {
+				if {$k != ""} {
+					puts $dfid "bsp config $k \"$v\""
+				}
+			}
+
+			# Get lib bsp settings
+			foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -lib]]] v [dict values [::json::json2dict [builtin_bsp -listparam -lib]]] {
+				if {$k != ""} {
+					puts $dfid "bsp config $k \"$v\""
+				}
+			}
+
 		} result options
 		if {$debug_prevent_fileio == 0} {
 			close $dfid
@@ -262,15 +260,22 @@ foreach app_name $app_names {
 	set app_dict [app report -dict $app_name]
 	set platform [dict get $app_dict "platform"]
 	set domain [dict get $app_dict "Domain"]
-	set lang "c"; # FIXME; cannot see an obvious way of automatically determining the language
+	set compiler [dict get [::json::json2dict [builtin_bsp -listparam -proc]] compiler]
+	set compiler_lang [lindex [split $compiler -] end]
+	set lang "c"
+
 	puts "WARNING: ${app_name}'s language set to c; if c++ is required, please edit its standalone_app script"
-	if {$lang == "c"} {
-		set template "{Empty Application}"
-	} elseif {$lang == "c++"} {
+	
+	if {$compiler_lang == "gcc"} {
+		set lang "c"
+		set template "{Empty Application(C)}"
+	} elseif {$compiler_lang == "g++"} {
+		set lang "c++"
 		set template "{Empty Application (C++)}"
 	} else {
 		return -code error "invalid language selection (must be c or c++): lang=$lang"
 	}
+
 	set sysproj [dict get $lookup_sysproj $app_name]
 	
 	# Copy build_app.tcl with no modifications
