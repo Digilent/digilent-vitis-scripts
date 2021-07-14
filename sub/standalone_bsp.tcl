@@ -9,8 +9,8 @@ puts "INFO: Running $script"
 set domain_name [file tail $script_dir]
 
 # Modify these for custom domain/BSP settings
-set arch "64-bit"
-set os "standalone"
+set arch "<architecture>"
+set os "<os>"
 set proc "<processor>"
 
 # Destination platform needs to be made active first
