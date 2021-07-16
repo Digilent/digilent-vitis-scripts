@@ -249,21 +249,9 @@ foreach app_name $app_names {
 	set app_dict [app report -dict $app_name]
 	set platform [dict get $app_dict "platform"]
 	set domain [dict get $app_dict "Domain"]
-	set compiler [dict get [::json::json2dict [builtin_bsp -listparam -proc]] compiler]
-	set compiler_lang [lindex [split $compiler -] end]
 	set lang "c"
 
 	puts "WARNING: ${app_name}'s language set to c; if c++ is required, please edit its standalone_app script"
-	
-	if {$compiler_lang == "gcc"} {
-		set lang "c"
-		set template "{Empty Application(C)}"
-	} elseif {$compiler_lang == "g++"} {
-		set lang "c++"
-		set template "{Empty Application (C++)}"
-	} else {
-		return -code error "invalid language selection (must be c or c++): lang=$lang"
-	}
 
 	set sysproj [dict get $lookup_sysproj $app_name]
 	
