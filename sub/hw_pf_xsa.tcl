@@ -12,4 +12,5 @@ puts "INFO: Found $hw_src"
 
 set hw_name [file tail $script_dir]
 
-platform create -name "$hw_name" -hw "$hw_src"
+# You may add extra options for custom platform creation
+platform create -name "$hw_name" -hw "$hw_src" -no-boot-bsp

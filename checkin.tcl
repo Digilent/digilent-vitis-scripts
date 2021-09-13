@@ -3,6 +3,7 @@
 
 set script [info script] 
 set script_dir [file normalize [file dirname $script]]
+set auto_boot_domain_exists 0
 
 puts "INFO: Running $script."
 
@@ -123,10 +124,11 @@ foreach pf $pf_names {
 			# Get domain properties
 			if { [string first "Auto Generated" [dict get [domain report -dict $d_name] {description}]] >= 0 } {
 				puts "INFO: Skipping $d_name, because it is auto-generated."
+				set auto_boot_domain_exists 1
 				continue;
 			}
 			set os [dict get [domain report -dict $d_name] {os}]
-			if { $os ne "standalone" } {
+			if { $os ne "standalone" && $os ne "linux" } {
 				puts "INFO: Skipping $d_name, because $os OS is not supported."
 				continue;
 			}
@@ -146,8 +148,17 @@ foreach pf $pf_names {
 		}
 		# For some reason it needs to be made active
 		domain active $d
-	
-		set d_subscript $dest_dir/$d/25_standalone_bsp.tcl
+		
+		# Check what type of domain is 
+		set os  [dict get [domain report -dict $d] {os}]
+		
+		
+		if {$os eq "standalone"} {
+			set d_subscript $dest_dir/$d/25_standalone_bsp.tcl
+		} else {
+			set d_subscript $dest_dir/$d/25_linux_domain.tcl
+		}  
+
 		puts "INFO: Generating $d_subscript."
 		
 		if {$debug_prevent_fileio == 0} {
@@ -155,45 +166,69 @@ foreach pf $pf_names {
 		} else {
 			set dfid stdout
 		}
-		set sfid [open $script_dir/sub/standalone_bsp.tcl r]
+		
+		if {$os eq "standalone"} {
+			set sfid [open $script_dir/sub/standalone_bsp.tcl r]
+		} else {
+			set sfid [open $script_dir/sub/linux_domain.tcl r]
+		}
 		catch {
-			# Get domain properties
-			set os  [dict get [domain report -dict $d] {os}]
+		
+		# Get common properties of domains 
+		set proc [dict get [domain report -dict $d] {processor}]
+		
+		# Get standalone domain specific properties 
+		if {$os eq "standalone"} {
 			set arch [dict get [domain report -dict $d] {arch}]
-			set proc [dict get [domain report -dict $d] {processor}]
+		
 			set var_map [list <processor>   $proc   \
                               <platform>    $pf \
-							  <architecture> $arch \
 							  <os> $os \
-						]
+						      <architecture> $arch \
+							  <auto_boot_domain_exists> $auto_boot_domain_exists  \
+					    ]
+		}
+		
+		
+		# Get linux domain specific properties 
+		if {$os eq "linux"} {
+			set var_map [list <processor>   $proc   \
+                              <platform>    $pf \
+							  <os> $os \
+							  <auto_boot_domain_exists> $auto_boot_domain_exists  \
+					    ]
+		}
+	
 			# Copy the subcript while replacing variables
 			while { [gets $sfid line] >= 0 } {
 				puts $dfid [string map $var_map $line]
 			}
-
+	
 			# NOTE: Here we use internal cmds ::json::json2dict and builtin_bsp due to the lack of "bsp listparams -dict"
 			# As such, we have implemented our own.
 
 			# Get os bsp settings
-			foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -os]]] v [dict values [::json::json2dict [builtin_bsp -listparam -os]]] {
-				if {$k != ""} {
-					puts $dfid "bsp config $k \"$v\""
+			
+			if {$os eq "standalone"} {
+				foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -os]]] v [dict values [::json::json2dict [builtin_bsp -listparam -os]]] {
+					if {$k != ""} {
+						puts $dfid "bsp config $k \"$v\""
+					}
 				}
-			}
+				# Get proc bsp settings
+				foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -proc]]] v [dict values [::json::json2dict [builtin_bsp -listparam -proc]]] {
+					if {$k != ""} {
+						puts $dfid "bsp config $k \"$v\""
+					}
+				}
 
-			# Get proc bsp settings
-			foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -proc]]] v [dict values [::json::json2dict [builtin_bsp -listparam -proc]]] {
-				if {$k != ""} {
-					puts $dfid "bsp config $k \"$v\""
+				# Get lib bsp settings
+				foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -lib]]] v [dict values [::json::json2dict [builtin_bsp -listparam -lib]]] {
+					if {$k != ""} {
+						puts $dfid "bsp config $k \"$v\""
+					}
 				}
-			}
-
-			# Get lib bsp settings
-			foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -lib]]] v [dict values [::json::json2dict [builtin_bsp -listparam -lib]]] {
-				if {$k != ""} {
-					puts $dfid "bsp config $k \"$v\""
-				}
-			}
+		    }
 
 		} result options
 		if {$debug_prevent_fileio == 0} {
@@ -245,14 +280,40 @@ foreach app_name $app_names {
 		puts "TRACE: file mkdir $dest_dir/$app_name"
 	}
 	
-	# Get app create arguments
+
+	
+	# The user must select the application language 
+	global lang;
+	set is_not_valid true
+	while { $is_not_valid } {
+		puts "WARNING: You must select the application language (${app_name}) in order to continue! Choose an option: (1/2):"
+		puts "1.C"
+		puts "2.C++"
+		set input [gets stdin]
+		switch $input {
+			1 {
+				 set lang "c"
+				 set is_not_valid false
+			}
+			2 {
+				 set lang "c++"
+				 set is_not_valid false
+			}
+			default {
+				set is_not_valid true
+			}
+		}
+	
+	}
+	
+	
+	# Get app create arguments 
 	set app_dict [app report -dict $app_name]
 	set platform [dict get $app_dict "platform"]
 	set domain [dict get $app_dict "Domain"]
-	set lang "c"
+	
 
-	puts "WARNING: ${app_name}'s language set to c; if c++ is required, please edit its standalone_app script"
-
+	
 	set sysproj [dict get $lookup_sysproj $app_name]
 	
 	# Copy build_app.tcl with no modifications
@@ -262,19 +323,33 @@ foreach app_name $app_names {
 		puts "TRACE: file copy -force -- $script_dir/sub/build_app.tcl $dest_dir/$app_name/145_build_app.tcl"
 	}
 	
-	# Copy standalone_app.tcl while replacing <var> identifiers with the corresponding value
+	# Copy standalone_app.tcl while replacing <var> identifiers with the corresponding value for a standalone app 
 	set var_map [list <domain>   $domain   \
 					  <platform> $platform \
 					  <lang>     $lang     \
 					  <sysproj>  $sysproj  ]
 					  
-	set infile [open $script_dir/sub/standalone_app.tcl "r"]
+
+  
+	if { $os eq "standalone" } {
+			set infile  [open $script_dir/sub/standalone_app.tcl "r"]
+		} else {
+			set infile  [open $script_dir/sub/linux_app.tcl "r"]
+	}  
+
 	if {$debug_prevent_fileio == 0} {
-		set outfile [open $dest_dir/$app_name/45_standalone_app.tcl "w"]
+			if { $os eq "standalone" }  {
+				set outfile [open $dest_dir/$app_name/45_standalone_app.tcl "w"]
+			} else {
+				set outfile [open $dest_dir/$app_name/45_linux_app.tcl "w"]
+			}
 	} else {
-		set outfile stdout
-	}
-	puts "INFO: Generating $dest_dir/$app_name/45_standalone_app.tcl"
+			set outfile stdout
+	} 
+	 
+	
+	puts "INFO: Generating 45_${os}_app.tcl."
+
 	
 	catch {
 	
@@ -323,8 +398,15 @@ foreach app_name $app_names {
 			# library-search-path not implemented; consider adding dedicated folders as in repo/vivado-library, repo/local
 			puts "WARNING: ${app_name} ${bc}'s library-search-path config will not be set by checkout"
 			
+			# Standalone apps work without linker-misc, however linux projects need --sysroot=${SYSROOT} to be added as a flag
+			set value [app config -get -name $app_name "linker-misc"]
+			puts $outfile "app config -set -name \$app_name linker-misc \{$value\}"
+			
 			# hardcode linker-script link to app src dir
-			puts $outfile "app config -set -name \$app_name linker-script \$script_dir/src/lscript.ld"
+			# Linker script only makes sense for baremetal application
+			if {$os eq "standalone"} {
+				puts $outfile "app config -set -name \$app_name linker-script \$script_dir/src/lscript.ld"
+			}
 			
 			# -set not supported for undef-compiler-symbols
 			set symbols [app config -get -name $app_name "undef-compiler-symbols"]
