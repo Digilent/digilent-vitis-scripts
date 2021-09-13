@@ -1,4 +1,4 @@
-# This script will create a standalone domain for a processor and its architecture
+# This script will create a linux domain for a processor 
 # Workspace should be set externally
 
 set script [info script] 
@@ -10,7 +10,6 @@ set domain_name [file tail $script_dir]
 
 # Modify these for custom domain/BSP settings
 
-set arch "<architecture>"
 set os "<os>"
 set proc "<processor>"
 set keep_boot_domain "<auto_boot_domain_exists>"
@@ -18,11 +17,14 @@ set keep_boot_domain "<auto_boot_domain_exists>"
 # Destination platform needs to be made active first
 platform active "<platform>"
 
-domain create -name $domain_name -proc $proc -arch $arch -os $os
+domain create -name $domain_name -proc $proc -os $os
 
 if {$keep_boot_domain == 1} {
 	platform config -create-boot-bsp
 	platform write
 }
 
-# Customize BSP, this replaces *.mss file
+# Platform needs to be built after creating the domain
+platform generate
+
+
