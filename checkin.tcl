@@ -284,8 +284,8 @@ foreach app_name $app_names {
 	
 	# The user must select the application language 
 	global lang;
-	set is_not_valid true
-	while { $is_not_valid } {
+	set lang_invalid true
+	while { $lang_invalid } {
 		puts "WARNING: You must select the application language (${app_name}) in order to continue! Choose an option: (1/2):"
 		puts "1.C"
 		puts "2.C++"
@@ -293,14 +293,14 @@ foreach app_name $app_names {
 		switch $input {
 			1 {
 				 set lang "c"
-				 set is_not_valid false
+				 set lang_invalid false
 			}
 			2 {
 				 set lang "c++"
-				 set is_not_valid false
+				 set lang_invalid false
 			}
 			default {
-				set is_not_valid true
+				set lang_invalid true
 			}
 		}
 	
