@@ -184,30 +184,16 @@ foreach pf $pf_names {
 		}
 		catch {
 		
-		# Get common properties of domains 
-		set proc [dict get [domain report -dict $d] {processor}]
+
+		# Get domain specific properties 
+			set proc [dict get [domain report -dict $d] {processor}]
 		
-		# Get standalone domain specific properties 
-		if {$os eq "standalone"} {
-			set arch [dict get [domain report -dict $d] {arch}]
-		
-			set var_map [list <processor>   $proc   \
-                              <platform>    $pf \
-							  <os> $os \
-						      <architecture> $arch \
-							  <auto_boot_domain_exists> $auto_boot_domain_exists  \
-					    ]
-		}
-		
-		
-		# Get linux domain specific properties 
-		if {$os eq "linux"} {
 			set var_map [list <processor>   $proc   \
                               <platform>    $pf \
 							  <os> $os \
 							  <auto_boot_domain_exists> $auto_boot_domain_exists  \
 					    ]
-		}
+
 	
 			# Copy the subcript while replacing variables
 			while { [gets $sfid line] >= 0 } {
@@ -290,8 +276,7 @@ foreach app_name $app_names {
 	} else {
 		puts "TRACE: file mkdir $dest_dir/$app_name"
 	}
-	
-
+		
 	
 	# The user must select the application language 
 	global lang;
@@ -322,9 +307,9 @@ foreach app_name $app_names {
 	set app_dict [app report -dict $app_name]
 	set platform [dict get $app_dict "platform"]
 	set domain [dict get $app_dict "Domain"]
+	set os [dict get [domain report -dict $domain] {os}]
 	
 
-	
 	set sysproj [dict get $lookup_sysproj $app_name]
 	
 	# Copy build_app.tcl with no modifications
@@ -358,7 +343,6 @@ foreach app_name $app_names {
 			set outfile stdout
 	} 
 	 
-	
 	puts "INFO: Generating 45_${os}_app.tcl."
 
 	
