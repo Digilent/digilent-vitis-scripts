@@ -1,7 +1,7 @@
 # Run this script to create the Vitis workspace in the <repo>/ws/ sub-directory
 # If ::create_path global variable is set, the project is created under that path instead of ws/
 
-set script [info script] 
+set script [file normalize [info script]] 
 set script_dir [file normalize [file dirname $script]]
 
 puts "INFO: Running $script."
