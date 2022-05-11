@@ -21,8 +21,8 @@ if { [llength [glob -nocomplain -types d $dest_dir/*]] != 0 } {
 	# If the workspace is already set to the destination directory
 	if { [file normalize [getws]] == [file normalize $dest_dir] } {
 		# Check if the workspace is empty, which it will be if Vitis is launched in an empty directory
-		if { [catch {app list} ] == 0 || [llength [platform list] ] != 0 || [catch {domain list} ] == 0 || [catch {library list} ] == 0 } {
-			puts "WARNING: workspace is not empty. Close Vitis or XSCT to relinquish control and run the cleanup scripts. Re-run create_workspace.tcl afterwards."
+		if { [catch {app list} ] == 0 || ([catch {platform list} ] == 0 && [catch {platform list}] == "") || [catch {domain list} ] == 0 || [catch {library list} ] == 0 } {
+			puts "WARNING: workspace is not empty. Close Vitis or XSCT to relinquish control and run the cleanup scripts. Re-run checkout.tcl afterwards."
 			flush stdout;
 			return -code error "Workspace already exists and needs to be closed first"
 		}
