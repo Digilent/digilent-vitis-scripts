@@ -61,17 +61,27 @@ if { [getws] eq "" } {
 	setws $ws_dir
 }
 
-# Do the hardware platforms
-set pf_names {}
-if { [catch {platform list}] == 0 } {
-	# -dict is undocumented but got it from Xilinx support
-	set pfs [platform list -dict]
-	foreach pf $pfs {
-		lappend pf_names [dict get $pf Name]
+
+# Get all the values from apps
+# We should get  values in the fallowing format {domain *_domain_fsbl platform *_hw_pf}
+set apps_values [dict values [app list -dict]]
+
+# Create array for storing workspace hw platforms 
+set apps_hw_plf ""
+
+# Create list with all the items from a apps_values
+foreach item $apps_values {
+		lappend apps_hw_plf $item
 	}
-}
+
+# Get all the platforms
+foreach item $apps_hw_plf {
+	if {[regexp {platform\s+(.*)} $item all value]} {
+		lappend pf_names $value }
+			}
 puts "INFO: Found the following platform projects: $pf_names."
 
+# Do the hardware platforms
 foreach pf $pf_names {
 	if { [file exists $dest_dir/$pf/] } {
 		if { ![overwrite_ok] } {
@@ -118,9 +128,9 @@ foreach pf $pf_names {
 	set domain_names {}
 	if { [catch {domain list}] == 0 } {
 		# -dict is undocumented but got it from Xilinx support
-		set domains [domain list -dict]
-		foreach d $domains {
-			set d_name [dict get $d {Name}]
+		# Get domains from existing keys
+		set domains [dict keys [domain list -dict]]
+		foreach d_name $domains {
 			# Get domain properties
 			if { [string first "Auto Generated" [dict get [domain report -dict $d_name] {description}]] >= 0 } {
 				puts "INFO: Skipping $d_name, because it is auto-generated."
@@ -135,7 +145,7 @@ foreach pf $pf_names {
 			lappend domain_names $d_name
 		}
 	}
-	if {[llength $domain_names] != 0} {puts "INFO: Found the following domains : $domain_names."}
+	if {[catch {domain list}] != 0 }  {puts "INFO: Found the following domains : $domain_names."}
 	
 	foreach d $domain_names {
 		if { [file exists $dest_dir/$d/] } {
@@ -230,10 +240,11 @@ set app_names ""
 if { [catch {app list}] != 0 } {
 	return -code error "ERROR: Workspace contains no applications"
 }
-set apps [app list -dict]
+
+#Get all the keys from apps
+set apps [dict keys [app list -dict]] 
 foreach a $apps {
-	puts $a
-	lappend app_names [dict get $a Name]
+	lappend app_names $a
 }
 puts "INFO: Found the following applications: $app_names"
 
@@ -290,8 +301,6 @@ foreach app_name $app_names {
 		}
 	
 	}
-	
-	
 	# Get app create arguments 
 	set app_dict [app report -dict $app_name]
 	set platform [dict get $app_dict "platform"]
