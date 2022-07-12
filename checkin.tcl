@@ -60,17 +60,27 @@ if { [getws] eq "" } {
 	setws $ws_dir
 }
 
-# Do the hardware platforms
-set pf_names {}
-if { [catch {platform list}] == 0 } {
-	# -dict is undocumented but got it from Xilinx support
-	set pfs [platform list -dict]
-	foreach pf $pfs {
-		lappend pf_names [dict get $pf Name]
+
+#Retrieve all the values from apps
+#We should retrieve values in the fallowing format {domain *_domain_fsbl platform *_hw_pf}
+set apps_values [dict values [app list -dict]]
+
+#Create array for storing workspace hw platforms 
+set apps_hw_plf ""
+
+#Create list with all the items from a apps_values
+foreach item $apps_values {
+		lappend apps_hw_plf $item
 	}
-}
+
+#Get all the platforms
+foreach item $apps_hw_plf {
+	if {[regexp {platform\s+(.*)} $item all value]} {
+		lappend pf_names $value }
+			}
 puts "INFO: Found the following platform projects: $pf_names."
 
+# Do the hardware platforms
 foreach pf $pf_names {
 	if { [file exists $dest_dir/$pf/] } {
 		if { ![overwrite_ok] } {
