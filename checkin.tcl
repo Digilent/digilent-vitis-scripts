@@ -203,8 +203,9 @@ foreach pf $pf_names {
 			# NOTE: Here we use internal cmds ::json::json2dict and builtin_bsp due to the lack of "bsp listparams -dict"
 			# As such, we have implemented our own.
 
+
+
 			# Get os bsp settings
-			
 			if {$os eq "standalone"} {
 				foreach k [dict keys [::json::json2dict [builtin_bsp -listparam -os]]] v [dict values [::json::json2dict [builtin_bsp -listparam -os]]] {
 					if {$k != ""} {
@@ -223,6 +224,31 @@ foreach pf $pf_names {
 					if {$k != ""} {
 						puts $dfid "bsp config $k \"$v\""
 					}
+				}
+			
+		set bspsettings "" 			
+			# Get os bsp settings			
+			if {$os eq "standalone"} {
+			# Catch any exception that may be caused by not having any lib set
+				if { [catch {bsp getlibs -dict}] == 0 } {
+			#Get all the libs	
+					set bsplibs [bsp getlibs -dict]
+						puts "INFO: Found the fallowing bsp libs settings for $d : $bsplibs"
+					}					
+			# Get all the bsp settings
+					foreach item $bsplibs {
+							if {[regexp {xil+(.*)} $item all value]} {
+								lappend bspsettings $item }
+							}
+							
+						puts "INFO: Wee need to set the fallowing bsp libs : $bspsettings for $d"
+						
+						
+					foreach k $bspsettings {
+						if {$k != ""} {
+							puts $dfid "bsp setlib -name $k"
+						}
+					}			
 				}
 		    }
 
