@@ -232,13 +232,12 @@ foreach pf $pf_names {
 			# Catch any exception that may be caused by not having any lib set
 				if { [catch {bsp getlibs -dict}] == 0 } {
 			#Get all the libs	
-					set bsplibs [bsp getlibs -dict]
+					set bsplibs [dict keys [bsp getlibs -dict]]
 						puts "INFO: Found the fallowing bsp libs settings for $d : $bsplibs"
 					}					
 			# Get all the bsp settings
 					foreach item $bsplibs {
-							if {[regexp {xil+(.*)} $item all value]} {
-								lappend bspsettings $item }
+							lappend bspsettings $item 
 							}
 							
 						puts "INFO: Wee need to set the fallowing bsp libs : $bspsettings for $d"
