@@ -8,4 +8,8 @@ puts "INFO: Running $script"
 
 set app_name [file tail $script_dir]
 
+# Variables created by checkin.tcl
+set configr "<configr>"
+
+app config -set -name $app_name build-config $configr
 app build -name $app_name

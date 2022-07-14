@@ -331,16 +331,38 @@ foreach app_name $app_names {
 	set platform [dict get $app_dict "platform"]
 	set domain [dict get $app_dict "Domain"]
 	set os [dict get [domain report -dict $domain] {os}]
-	
+	set app_configr [app config -name $app_name -get build-config]
 
 	set sysproj [dict get $lookup_sysproj $app_name]
 	
 	# Copy build_app.tcl with no modifications
-	if {$debug_prevent_fileio == 0} {
-		file copy -force -- $script_dir/sub/build_app.tcl $dest_dir/$app_name/145_build_app.tcl
-	} else {
-		puts "TRACE: file copy -force -- $script_dir/sub/build_app.tcl $dest_dir/$app_name/145_build_app.tcl"
+	# if {$debug_prevent_fileio == 0} {
+	# 	file copy -force -- $script_dir/sub/build_app.tcl $dest_dir/$app_name/145_build_app.tcl
+	# } else {
+	# 	puts "TRACE: file copy -force -- $script_dir/sub/build_app.tcl $dest_dir/$app_name/145_build_app.tcl"
+	# }
+	
+	# Copy build_app.tcl while replacing <var> identifiers with the corresponding value for a standalone app 
+	set var_map_build_app [list <configr> $app_configr]
+	
+	if { $os eq "standalone" } {
+		set in_build_app_file  [open $script_dir/sub/build_app.tcl "r"]
+		set out_build_app_file [open $dest_dir/$app_name/145_build_app.tcl "w"]
+		}
+		
+	while {[gets $in_build_app_file s] >= 0} {
+		puts $out_build_app_file [string map $var_map_build_app $s]
 	}
+	
+	
+	close $in_build_app_file 
+	
+	if {$debug_prevent_fileio == 0} {
+		close $out_build_app_file
+	}
+
+
+	
 	
 	# Copy standalone_app.tcl while replacing <var> identifiers with the corresponding value for a standalone app 
 	set var_map [list <domain>   $domain   \
