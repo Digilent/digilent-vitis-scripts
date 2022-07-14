@@ -346,25 +346,20 @@ foreach app_name $app_names {
 	
 	# Copy build_app.tcl while replacing <var> identifiers with the corresponding value for a standalone app 
 	set var_map_build_app [list <configr> $app_configr]
+
+	#Open build_app template in read mode
+	set in_build_app_file  [open $script_dir/sub/build_app.tcl "r"]
 	
-	if { $os eq "standalone" } {
-		set in_build_app_file  [open $script_dir/sub/build_app.tcl "r"]
-		set out_build_app_file [open $dest_dir/$app_name/145_build_app.tcl "w"]
-		}
+	#Open build_app src file in write mode
+	set out_build_app_file [open $dest_dir/$app_name/145_build_app.tcl "w"]
+		
 		
 	while {[gets $in_build_app_file s] >= 0} {
 		puts $out_build_app_file [string map $var_map_build_app $s]
 	}
 	
-	
 	close $in_build_app_file 
-	
-	if {$debug_prevent_fileio == 0} {
-		close $out_build_app_file
-	}
-
-
-	
+	close $out_build_app_file
 	
 	# Copy standalone_app.tcl while replacing <var> identifiers with the corresponding value for a standalone app 
 	set var_map [list <domain>   $domain   \
