@@ -351,15 +351,21 @@ foreach app_name $app_names {
 	set in_build_app_file  [open $script_dir/sub/build_app.tcl "r"]
 	
 	#Open build_app src file in write mode
+	if {$debug_prevent_fileio == 0} {
 	set out_build_app_file [open $dest_dir/$app_name/145_build_app.tcl "w"]
-		
+	} else {
+			set out_build_app_file stdout
+	} 
 		
 	while {[gets $in_build_app_file s] >= 0} {
 		puts $out_build_app_file [string map $var_map_build_app $s]
 	}
 	
 	close $in_build_app_file 
+	
+	if {$debug_prevent_fileio == 0} {
 	close $out_build_app_file
+	}
 	
 	# Copy standalone_app.tcl while replacing <var> identifiers with the corresponding value for a standalone app 
 	set var_map [list <domain>   $domain   \
