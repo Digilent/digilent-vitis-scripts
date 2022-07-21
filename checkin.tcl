@@ -227,29 +227,26 @@ foreach pf $pf_names {
 				}
 			
 		set bspsettings "" 			
-			# Get os bsp settings			
-			if {$os eq "standalone"} {
 			# Catch any exception that may be caused by not having any lib set
 				if { [catch {bsp getlibs -dict}] == 0 } {
 			#Get all the libs	
 					set bsplibs [dict keys [bsp getlibs -dict]]
 						puts "INFO: Found the fallowing bsp libs settings for $d : $bsplibs"
-					}					
-			# Get all the bsp settings
+						
+						# Get all the bsp settings
 					foreach item $bsplibs {
 							lappend bspsettings $item 
 							}
 							
 						puts "INFO: Wee need to set the fallowing bsp libs : $bspsettings for $d"
 						
-						
-					foreach k $bspsettings {
+									foreach k $bspsettings {
 						if {$k != ""} {
 							puts $dfid "bsp setlib -name $k"
 						}
-					}			
 				}
-		    }
+			}						
+		 }
 
 		} result options
 		if {$debug_prevent_fileio == 0} {
