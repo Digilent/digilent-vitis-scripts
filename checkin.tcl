@@ -114,7 +114,7 @@ foreach pf $pf_names {
 	catch {
 		# Export platform config
 		puts $fid "\n"
-		puts $fid "platform config -extra-compiler-flags fsbl \"[platform config -extra-compiler-flags fsbl]\""
+		puts $fid "platform config -extra-compiler-flags fsbl \" [platform config -extra-compiler-flags fsbl]\""
 		puts $fid "platform config -extra-linker-flags fsbl \"[platform config -extra-linker-flags fsbl]\""
 		puts $fid "platform config -extra-compiler-flags pmufw \"[platform config -extra-compiler-flags pmufw]\""
 		puts $fid "platform config -extra-linker-flags pmufw \"[platform config -extra-linker-flags pmufw]\""
