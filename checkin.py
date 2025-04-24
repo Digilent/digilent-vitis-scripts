@@ -25,6 +25,7 @@ from json import (JSONEncoder, JSONDecoder
 from logging import (Logger, INFO, StreamHandler,
                      Formatter
                      )
+from re import compile
 
 def LOG(msg="",
         format="%(asctime)s %(levelname)s : %(message)s",
@@ -299,11 +300,14 @@ class SrcFilesWS:
     BUILD_FILE_IDX = 0
     COMP_FILE_IDX = 1
     # Predef vectors - some files need to have a standard name.
-    # Note :: first item is always excluded
+    # Note :: First and last item are always excluded.
     lsConfCpy = ["CMakeLists.txt", "vitis-comp.json", "*.cmake",
-                 "*.ld", ".gitignore"
+                 "*.ld", "Makefile", ".gitignore"
                  ]
-    lsSrcCpy = ["*.h", "*.hpp", "*.c", "*.cpp", "*.cc"]
+    lsSrcCpy = ["*.h", "*.hpp", "*.c",
+                "*.cpp", "*.cc", "*.S",
+                "*.scat", "*.mk"
+                ]
     HOFF_HDL = "*.xsa"
     FAILURE = -1
     SUCCESS = 0
@@ -513,6 +517,7 @@ class Workspace:
     Extract/Store different files that
     are in every WS made with vitis >= v2023.2.
     """
+
     def __init__(self):
         """
         @Description
@@ -526,6 +531,8 @@ class Workspace:
         attributes (SrcFilesWS or ConfigWS) by reference, not redundant copies.
         """
         self.sfWs = SrcFilesWS()
+        # pattern vector; /i -> case insensitive;
+        self.lsExcludedApps = [compile("fsbl")]
         if UtilityWS.IS_DIRS:
             self.findPlatforms()
             # Set multiple Utility ... ? 'fa(), ...'
@@ -533,116 +540,30 @@ class Workspace:
             self.cfgWs = ConfigWS()
             _lApps = self.findApplications()
             self.cfgWs.setApps(_lApps)
-
         LOG("All files have been collected!")
 
-    def findApplications(self) -> list:
+    def muxCondExpr(self,
+                    lsCond : list,
+                    lsExpr : list
+                    ) -> None:
         """
         @Description
-        Applications have a vitis-comp.json file that is checked to
-        validate if it's platform or app. SrcFilesWS.lsConfCpy vector
-        on idx=1 has predefined this file. It appears in <platform-dirname>
-        too when an application is created by vitis.
-        
-        Path("<path>").rglob("<file-pattern>") searches in "<path>" all
-        occurences of "<file-patter>". It returns a generator that can be
-        casted to a vector/list obj. Therefore, indexing the wanted element,
-        such as CMakeLists.txt or *.json.
-        
-        Apps are counted with idxApp and passed to self.gatherAppOtherConf,
-        Some sort of correlation can be done to know which app has a certain
-        platform. With a JSONDecoder, file-buffer is read then passed to
-        <jsondecoder-obj>.decode func to get {[keys...] : [values...]} struct.
-        """
-        IDX_VCOMP = 0
-        self.sfWs.lsBldFl = []
-        # No intermediate dirs, levelDepth ~ 1
-        chdir(self.sfWs.appDir)
-        # Store apps build files.
-        lsDirApps = []
-        pCwd = getcwd()
-        idxApp = 0
-        for item in listdir(pCwd):
-            if path.isdir(item) is False or item.startswith("."):
-                continue
-            # Get build file ~ maybe check if it exists ?
-            # Check for vitis-comp.json or other files specific to an application.
-            pItem = path.join(pCwd, item)
-            cmpFile = list(Path(pItem).rglob(
-                              SrcFilesWS.lsConfCpy[SrcFilesWS.COMP_FILE_IDX]
-                          )
-                      )
-            if len(cmpFile) == UtilityWS.EMPTY_BUFFER:
-                continue
-            strCmpFile = str(cmpFile[IDX_VCOMP])
-            # Extract type of component; this can be moved to UtilityWS.
-            # Extras: An app can have multiple templates though, but vitis-py-tools bugs
-            # prevent it from having them set, except <hello-world>.
-            dJsonData = JSONDecoder().decode(open(strCmpFile).read())
-            if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
-                ((dJsonData["type"] == "HOST" or dJsonData["type"] == "HLS") or
-                  dJsonData["type"] == "UNKNOWN"
-                 )
-                ):
-                # Associate application with its platform.
-                appName = pItem[pItem.rfind(sep) + 1:]
-                lHwPlt = dJsonData["platform"]
-                # Path to .xpfm file;
-                idxPltName = lHwPlt.rfind(sep)
-                # Pay attention which Utility object is used, bcs encJSON_Ws depends on it.
-                relPathPlt = SrcFilesWS.APP_SRCCODE + sep + \
-                             lHwPlt[idxPltName + 1:lHwPlt.rfind(".")] + sep + \
-                             lHwPlt[idxPltName + 1:lHwPlt.rfind(".")] + ".xsa"
-                self.cfgWs.utilCfgWs.dPltAppCorr[appName] = relPathPlt
-                # Search for buid file.
-                bFile = list(Path(pItem).rglob(
-                                SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX]
-                            )
-                        )
-                # Just one element should be in the list.
-                if len(bFile) != UtilityWS.EMPTY_BUFFER:
-                    lsDirApps.append(pItem)
-                    # Populate in SrcFilesWS scope, SrcFilesWS.BUILD_FILE_IDX or simply 0.
-                    self.sfWs.lsBldFl.append(path.join(pItem, str(bFile[SrcFilesWS.BUILD_FILE_IDX])))
-                    self.sfWs.lsTempSrcFl.append([])
-                    # Collect source files from <app-dir>/src.
-                    self.gatherAppSrcCd(pItem, idxApp)
-                    self.gatherAppOtherConf(pItem, idxApp)
-                    idxApp = idxApp + 1
-        # Get back to 'sw submodule'.
-        chdir(self.sfWs.pSubSw)
-        LOG("Number of applications found: " + str(len(lsDirApps)))
-        return lsDirApps
+        Iterate over expressions that need to be evaluated in some
+        sort of condition, this func can get two lists, one with the
+        expressions, the other one with what can be evaluated as a 
+        valid statement.
 
-    def findPlatforms(self) -> None:
+        @Parameters
+        lsExpr: vector of expressions like <item>.<startswith(".")>,
+                where item is to the left, startswith(".") to the right,
+                similar to a pair; e.g: [[item, startswith(".")], ...]
+        lsCond: vector of statements that will be compared with what pair.right
+                like expressions return, False, True, None, some date type.
         """
-        @Description
-        Working dir when this func is called must be sw submodule. Anyway,
-        sw structure had been verified long before calling findPlatforms.
-        Iterate over all content of <ws> to find *.xsa file(s). Only the first
-        file found is stored in self.sfWs.lsArchFl, <platform-dirname> into
-        self.sfWs.lsArchPltDir respectively.
-        """
-        IDX_FRENC = 0
-        self.sfWs.lsArchFl, self.sfWs.lsArchPltDir = [], []
-        chdir(self.sfWs.appDir)
-        pCwd = getcwd()
-        for item in listdir(pCwd):
-            if path.isdir(item) is False or item.startswith("."):
-                continue
-            # Get handoff ~ can be more
-            pItem = path.join(pCwd, item)
-            archFile = list(Path(pItem).rglob(SrcFilesWS.HOFF_HDL))
-            # Just one element should be in the list.
-            # Maybe check for vitis-comp.json or other files specific to a platform ?
-            if len(archFile) != UtilityWS.EMPTY_BUFFER:
-                # Populate with xsa files path.
-                self.sfWs.lsArchFl.append(str(archFile[IDX_FRENC]))
-                # Preserve platforms dirs.
-                self.sfWs.lsArchPltDir.append(item)
-        # Get back to 'sw submodule'.
-        chdir(self.sfWs.pSubSw)
-        LOG("Number of platforms found: " + str(len(self.sfWs.lsArchPltDir)))
+        left, right = 0, 1
+        for condition in lsCond:
+            # TODO: map to different expressions with their expected return.
+            pass
 
     def gatherAppSrcCd(self,
                        pSrcFl : str,
@@ -705,6 +626,131 @@ class Workspace:
                     # [[]] - type
                     self.sfWs.lsTempSrcFl[idxApp].append([str(itm) for itm in srcFiles])
             chdir(pCwd)
+
+    def processGatherFiles(self,
+                           idxApp : int,
+                           cmpFile : list,
+                           dJsonData : dict,
+                           pItem : str,
+                           lsDirApps : list
+                           ) -> int:
+        """
+        @Description
+        Filter Vitis applications files, gather source files + other configs,
+        findApplications uses it, but functions should have a limited no. or lines.
+        Check description from it.
+        """
+        if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
+            ((dJsonData["type"] == "HOST" or
+              dJsonData["type"] == "HLS") or
+              dJsonData["type"] == "UNKNOWN"
+             )
+            ):
+            # Associate application with its platform.
+            appName = pItem[pItem.rfind(sep) + 1:]
+            lHwPlt = dJsonData["platform"]
+            # Path to .xpfm file;
+            idxPltName = lHwPlt.rfind(sep)
+            # Pay attention which Utility object is used, bcs encJSON_Ws depends on it.
+            relPathPlt = SrcFilesWS.APP_SRCCODE + sep + \
+                            lHwPlt[idxPltName + 1:lHwPlt.rfind(".")] + sep + \
+                            lHwPlt[idxPltName + 1:lHwPlt.rfind(".")] + ".xsa"
+            self.cfgWs.utilCfgWs.dPltAppCorr[appName] = relPathPlt
+            # Search for buid file.
+            bFile = list(Path(pItem).rglob(
+                            SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX]
+                        )
+                    )
+            # Just one element should be in the list.
+            if len(bFile) != UtilityWS.EMPTY_BUFFER:
+                lsDirApps.append(pItem)
+                # Populate in SrcFilesWS scope, SrcFilesWS.BUILD_FILE_IDX or simply 0.
+                self.sfWs.lsBldFl.append(path.join(pItem, str(bFile[SrcFilesWS.BUILD_FILE_IDX])))
+                self.sfWs.lsTempSrcFl.append([])
+                # Collect source files from <app-dir>/src.
+                self.gatherAppSrcCd(pItem, idxApp)
+                self.gatherAppOtherConf(pItem, idxApp)
+                idxApp = idxApp + 1
+
+    def findApplications(self) -> list:
+        """
+        @Description
+        Applications have a vitis-comp.json file that is checked to
+        validate if it's platform or app. SrcFilesWS.lsConfCpy vector
+        on idx=1 has predefined this file. It appears in <platform-dirname>
+        too when an application is created by vitis.
+        
+        Path("<path>").rglob("<file-pattern>") searches in "<path>" all
+        occurences of "<file-patter>". It returns a generator that can be
+        casted to a vector/list obj. Therefore, indexing the wanted element,
+        such as CMakeLists.txt or *.json.
+        
+        Apps are counted with idxApp and passed to self.gatherAppOtherConf,
+        Some sort of correlation can be done to know which app has a certain
+        platform. With a JSONDecoder, file-buffer is read then passed to
+        <jsondecoder-obj>.decode func to get {[keys...] : [values...]} struct.
+        """
+        IDX_VCOMP = 0
+        self.sfWs.lsBldFl = []
+        # No intermediate dirs, levelDepth ~ 1;
+        chdir(self.sfWs.appDir)
+        # Store apps build files.
+        lsDirApps = []
+        pCwd = getcwd()
+        idxApp = 0
+        for item in listdir(pCwd):
+            if path.isdir(item) is False or item.startswith("."): continue
+            # Get build file ~ maybe check if it exists ?
+            # Check for vitis-comp.json or other files specific to an application.
+            pItem = path.join(pCwd, item)
+            cmpFile = list(Path(pItem).rglob(
+                              SrcFilesWS.lsConfCpy[SrcFilesWS.COMP_FILE_IDX]
+                          )
+                      )
+            if len(cmpFile) == UtilityWS.EMPTY_BUFFER: continue
+            strCmpFile = str(cmpFile[IDX_VCOMP])
+            # Extract type of component; this can be moved to UtilityWS.
+            # Extras: An app can have multiple templates though, but vitis-py-tools bugs
+            # prevent it from having them set, except <hello-world>.
+            dJsonData = JSONDecoder().decode(open(strCmpFile).read())
+            # For now just one type of application is needed to not be saved.
+            mtName = self.lsExcludedApps[0].search(dJsonData["name"])
+            if mtName is not None: continue
+            # Pass parameters by ref with the same names.
+            iRet = self.processGatherFiles(idxApp, cmpFile, dJsonData, pItem, lsDirApps)
+        # Get back to 'sw submodule'.
+        chdir(self.sfWs.pSubSw)
+        LOG("Number of applications found: " + str(len(lsDirApps)))
+        return lsDirApps
+
+    def findPlatforms(self) -> None:
+        """
+        @Description
+        Working dir when this func is called must be sw submodule. Anyway,
+        sw structure had been verified long before calling findPlatforms.
+        Iterate over all content of <ws> to find *.xsa file(s). Only the first
+        file found is stored in self.sfWs.lsArchFl, <platform-dirname> into
+        self.sfWs.lsArchPltDir respectively.
+        """
+        IDX_FRENC = 0
+        self.sfWs.lsArchFl, self.sfWs.lsArchPltDir = [], []
+        chdir(self.sfWs.appDir)
+        pCwd = getcwd()
+        for item in listdir(pCwd):
+            if path.isdir(item) is False or item.startswith("."): continue
+            # Get handoff ~ can be more;
+            pItem = path.join(pCwd, item)
+            archFile = list(Path(pItem).rglob(SrcFilesWS.HOFF_HDL))
+            # Just one element should be in the list.
+            # Maybe check for vitis-comp.json or other files specific to a platform ?
+            if len(archFile) != UtilityWS.EMPTY_BUFFER:
+                # Populate with xsa files path.
+                self.sfWs.lsArchFl.append(str(archFile[IDX_FRENC]))
+                # Preserve platforms dirs.
+                self.sfWs.lsArchPltDir.append(item)
+        # Get back to 'sw submodule'.
+        chdir(self.sfWs.pSubSw)
+        LOG("Number of platforms found: " + str(len(self.sfWs.lsArchPltDir)))
 
     def checkInSF(self) -> int:
         """
