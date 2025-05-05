@@ -2,7 +2,7 @@
 """
     Company: Digilent RO
     Engineer: bs
-    Usage: for vitis projects (>= v2023.2)
+    Usage: for vitis projects
     
     @Description
     This checkin.py has the same behavior
@@ -13,46 +13,14 @@
     Vitis v2024.1 has Python v3.8.3.
 """
 from os import (chdir, getcwd, listdir,
-                path, sep, makedirs, mkdir
-                )
-from sys import stdout
-from vitis import (_build, _server
-                   )
+                path, sep, makedirs, mkdir,
+                access, F_OK, SEEK_END)
+from vitis import (_build, _server)
 from pathlib import Path
 from shutil import copy
-from json import (JSONEncoder, JSONDecoder
-                  )
-from logging import (Logger, INFO, StreamHandler,
-                     Formatter
-                     )
-from re import compile
-
-def LOG(msg="",
-        format="%(asctime)s %(levelname)s : %(message)s",
-        ) -> None:
-    """
-    @Description
-    Custom logging mechanism for displaying informations during
-    the execution of check in workflow.
-
-    @Parameters
-    msg: message to display to stdout
-    format: default format: time - level name - actual message
-    """
-    class _LOG(Logger):
-        """
-        Simple layout class for logging
-        """
-        def __init__(self, msg, fmt, stream=stdout):
-            super().__init__(name="Info Checkin", level=INFO)
-            self.sHnd = StreamHandler(stream)
-            self.message = msg
-            self._formater = Formatter(fmt)
-            self.sHnd.setFormatter(self._formater)
-            self.addHandler(self.sHnd)
-            self.log(level=INFO, msg=self.message)
-    # Nested log
-    _locLog = _LOG(msg, format)
+from json import (JSONEncoder, JSONDecoder)
+from re import (compile, RegexFlag)
+from misc import LOG
 
 class UtilityWS:
     """
@@ -120,14 +88,20 @@ class UtilityWS:
         self._dPltAppCorr = {}
         self.enJsonObjFile = JSONEncoder(indent="\t", separators=(",", " : "))
         # Check for src and ws dirs.
+        lcWsDir = path.join(self._pSubSw, self._appDir)
         if path.isdir(self._srcDir) and path.isdir(self._appDir):
             if UtilityWS.srvCl is None:
-                UtilityWS.srvCl = _server.Server(
-                    port=None,
-                    host="localhost",
-                    workspace=path.join(self._pSubSw, self._appDir)
-                )
-            UtilityWS.IS_DIRS = True
+                try:
+                    LOG(msg="Local server, starting Vitis server...")
+                    # Init server with pre-defined args.
+                    UtilityWS.srvCl = _server.Server(
+                        port=None,
+                        host="localhost",
+                        workspace=lcWsDir
+                        )
+                    UtilityWS.IS_DIRS = True
+                except Exception as err:
+                    LOG(msg=f"Error Local server: {err.__class__} {err.__context__}")
 
     def encJSON_Ws(self,
                    bdRes : list,
@@ -163,6 +137,7 @@ class UtilityWS:
                 LOG(f"File sw{sep}src{sep}{dirApp}{sep}{self.wsJsonConf} has been created!")
             else:
                 LOG("Data structure from Vitis modules has NOT been parsed correctly!")
+                return UtilityWS.FAILURE
             chdir(sPrevWd)
             if idx < len(bdRes):
                 idx = idx + 1
@@ -252,14 +227,9 @@ class ConfigWS:
         # Store all configs from apps.
         self._bdRes = []
         # Py makes here a reference automatically, _ref<...> just for intuitive distinction.
-        self._refLApps = lApps
+        self._refLApps = []
         if UtilityWS.IS_DIRS and lApps is not None:
-            for item in lApps:
-                self._bdRes.append(
-                    self.bdComp.getAppConfig(
-                        component_location=item
-                    )
-                )
+            self.setApps(lApps)
 
     def setApps(self, lApps : list) -> None:
         self._refLApps = lApps
@@ -267,8 +237,8 @@ class ConfigWS:
             self._bdRes.append(
                 self.bdComp.getAppConfig(
                     component_location=item
+                    )
                 )
-            )
 
     @property
     def dPltAppCorr(self) -> dict:
@@ -306,7 +276,8 @@ class SrcFilesWS:
                  ]
     lsSrcCpy = ["*.h", "*.hpp", "*.c",
                 "*.cpp", "*.cc", "*.S",
-                "*.scat", "*.mk"
+                "*.scat", "*.mk", "*.C",
+                "*.cxx", "*.c++", "*.s"
                 ]
     HOFF_HDL = "*.xsa"
     FAILURE = -1
@@ -532,7 +503,7 @@ class Workspace:
         """
         self.sfWs = SrcFilesWS()
         # pattern vector; /i -> case insensitive;
-        self.lsExcludedApps = [compile("fsbl")]
+        self.lsExcludedApps = [compile("fsbl", RegexFlag.IGNORECASE)]
         if UtilityWS.IS_DIRS:
             self.findPlatforms()
             # Set multiple Utility ... ? 'fa(), ...'
@@ -540,35 +511,12 @@ class Workspace:
             self.cfgWs = ConfigWS()
             _lApps = self.findApplications()
             self.cfgWs.setApps(_lApps)
-        LOG("All files have been collected!")
-
-    def muxCondExpr(self,
-                    lsCond : list,
-                    lsExpr : list
-                    ) -> None:
-        """
-        @Description
-        Iterate over expressions that need to be evaluated in some
-        sort of condition, this func can get two lists, one with the
-        expressions, the other one with what can be evaluated as a 
-        valid statement.
-
-        @Parameters
-        lsExpr: vector of expressions like <item>.<startswith(".")>,
-                where item is to the left, startswith(".") to the right,
-                similar to a pair; e.g: [[item, startswith(".")], ...]
-        lsCond: vector of statements that will be compared with what pair.right
-                like expressions return, False, True, None, some date type.
-        """
-        left, right = 0, 1
-        for condition in lsCond:
-            # TODO: map to different expressions with their expected return.
-            pass
+            LOG("All files have been collected!")
 
     def gatherAppSrcCd(self,
                        pSrcFl : str,
                        idxApp : int
-                       ) -> None:
+                       ):
         """
         @Description
         Store in a list which is associated with an app, all the files
@@ -595,7 +543,7 @@ class Workspace:
                            pSrcFl : str,
                            idxApp : int,
                            repflOpt : bool = False
-                           ) -> None:
+                           ):
         """
         @Description
         Files from SrcFilesWS.lsConfCpy are added to self.sfWs.lsTempSrcFl if
@@ -643,8 +591,7 @@ class Workspace:
         if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
             ((dJsonData["type"] == "HOST" or
               dJsonData["type"] == "HLS") or
-              dJsonData["type"] == "UNKNOWN"
-             )
+              dJsonData["type"] == "UNKNOWN")
             ):
             # Associate application with its platform.
             appName = pItem[pItem.rfind(sep) + 1:]
@@ -658,9 +605,7 @@ class Workspace:
             self.cfgWs.utilCfgWs.dPltAppCorr[appName] = relPathPlt
             # Search for buid file.
             bFile = list(Path(pItem).rglob(
-                            SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX]
-                        )
-                    )
+                            SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX]))
             # Just one element should be in the list.
             if len(bFile) != UtilityWS.EMPTY_BUFFER:
                 lsDirApps.append(pItem)
@@ -704,9 +649,7 @@ class Workspace:
             # Check for vitis-comp.json or other files specific to an application.
             pItem = path.join(pCwd, item)
             cmpFile = list(Path(pItem).rglob(
-                              SrcFilesWS.lsConfCpy[SrcFilesWS.COMP_FILE_IDX]
-                          )
-                      )
+                            SrcFilesWS.lsConfCpy[SrcFilesWS.COMP_FILE_IDX]))
             if len(cmpFile) == UtilityWS.EMPTY_BUFFER: continue
             strCmpFile = str(cmpFile[IDX_VCOMP])
             # Extract type of component; this can be moved to UtilityWS.
@@ -723,7 +666,7 @@ class Workspace:
         LOG("Number of applications found: " + str(len(lsDirApps)))
         return lsDirApps
 
-    def findPlatforms(self) -> None:
+    def findPlatforms(self):
         """
         @Description
         Working dir when this func is called must be sw submodule. Anyway,
