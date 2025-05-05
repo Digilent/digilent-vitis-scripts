@@ -8,16 +8,16 @@ it contains for now solutions for check in/out workflow.
 *Vitis creates a `.lock` file which after the IDE is closed or other*
 *Vitis TCP/IP server is stopped, it will have its file descriptor still*
 *hooked up to the previous process, so only after a few seconds should*
-*one of the files be run. A workaround will be provided soon.*
+*one of the files be run.*
 
 ----
 
 ## Quick Checkout Guide
 
 Some Digilent Github repositories also require that you check out a specific demo branch.
-Whenever checking out a demo branch, submodules should be reupdated and reinitialized:
+Whenever checking out a demo branch, submodules should be updated and initialized:
 
-`git submodule update --init`
+`git submodule update --init [--recursive]`
 
 When launching Vitis, whether through Vivado's *Tools* menu, or on its own,
 the Vitis workspace should be set to the repository's sw -> ws folder.
@@ -70,9 +70,10 @@ create one and `cd` into it. Adding the `scripts` path argument to the command i
 in order to keep file paths short.
 
 `git submodule add https://github.com/Digilent/digilent-vitis-scripts scripts`
+
 `git checkout new_vitis/2024.1`
 
-The scripts present in this repository can be run through the use of the
+The scripts presented in this repository can be run through the use of the
 Vitis Console 202x.y, for example 2024.1, which comes along with Vitis.
 Upon launch, Vitis Console's current working directory is set to the
 Vitis install directory: Xilinx -> Vitis -> 202x.y -> bin.
@@ -83,11 +84,11 @@ To backup the workspace, enter the following command into the Vitis Console:
 The above functionality can be reproduced from Vitis IDE launching the terminal from
 Terminal -> New Terminal which uses the default command line executable from the OS. If
 this is the choosen method, then it will be necessary to give absolute path to the `checkin.py`
-file, not relative, or to change current working directory to the branch's sw submodule.
+file, not relative, or to change current working directory to the wanted sw submodule branch.
 
 `vitis -s <path-to-scripts-repo>checkin.py`
 
-This script will create a `src` directory in the same folder as the scripts submodule, and populate it as below:
+This script needs to have `src` directory in the same folder as the scripts submodule, populating it as below:
 
 * One folder per hardware platform
   * The XSA file describing the hardware specification that the software targets, exported from Vivado.
