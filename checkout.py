@@ -16,14 +16,15 @@
 from vitis import create_client, dispose
 import time
 from datetime import datetime
-from shutil import rmtree
+import shutil
 from re import search
 from json import JSONDecoder
 from os import (path, getcwd, walk,
-                sep
+                sep, listdir, unlink
                 )
 import hsi
 import xsdb
+import sys
 
 class Workspace:
     """
@@ -161,11 +162,13 @@ class Workspace:
         repo_path = script_path[:script_path.rfind(sep)] + sep + 'repo'
         # Delete the workspace if already exists.
         if (path.isdir(ws_path)):
-            rmtree(ws_path)
+            shutil.rmtree(ws_path)
             print(f"Deleted workspace {ws_path}")
         client.set_workspace(ws_path)
         print("Successfully created Vitis client on workspace {}".format(client.get_workspace()))
         app_names = []
+        hw_platforms = []
+        hw_pf_paths = []
         for dirpath, dirnames, filenames in walk(script_path[:script_path.rfind(sep)] + f"{sep}src"):
             print(filenames)
             for dirname in dirnames:
@@ -183,9 +186,14 @@ class Workspace:
                     file = path.join(dirpath, filename)
                     print(f"Found - {file}")
                     print(f"xsa dirpath = {dirpath}")
-                    print(f"xsa dirname = {path.basename(dirpath)}")
-                    xsa_dirpath_name = path.basename(dirpath)
+                    xsa_dirpath = dirpath
+                    hw_pf_paths.append(xsa_dirpath)
+                    print(f"xsa dirname = {path.basename(xsa_dirpath)}")
+                    xsa_dirpath_name = path.basename(xsa_dirpath)
+                    hw_platforms.append(xsa_dirpath_name)
         print(f"\nDetected one or more applications present: {app_names}")
+        print(f"Detected one or more hardware platforms present: {hw_platforms}")
+        print(hw_pf_paths)
         
         ret_metadata = {"arch" : "", "target_proc" : ""}
 
@@ -194,6 +202,7 @@ class Workspace:
         arch_and_cpu_metadata = get_metadata(xsa=file, open_xsa="1")
 
         arch = arch_and_cpu_metadata['arch']
+        
         if arch in ('spartan7', 'artix7', 'kintex7'):
             target_proc = 'microblaze_0'
         else:
@@ -201,6 +210,21 @@ class Workspace:
         
         print("Info: Detected arch: " + arch)
         print("Info: Using target processor: " + target_proc)
+        
+        # List all files and directories in the given path
+        # Remove all files that result from get_metadata() unzipping the xsa
+        for xsa_path in hw_pf_paths:
+            print(listdir(xsa_path))
+            for filename in listdir(xsa_path):
+                if not filename.endswith(".xsa"):
+                    file_path = path.join(xsa_path, filename)
+                    try:
+                        if path.isfile(file_path) or path.islink(file_path):
+                            unlink(file_path)           # Remove file or symbolic link
+                        elif path.isdir(file_path):
+                            shutil.rmtree(file_path)       # Remove directory and its contents
+                    except Exception as e:
+                        print(f'Failed to delete {file_path}. Reason: {e}')
 
         end_time = time.time()
         # Measure execution time
