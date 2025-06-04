@@ -14,12 +14,16 @@
     Vitis v2024.1 has Python v3.8.3.
 """
 from vitis import create_client, dispose
+import time
+from datetime import datetime
 from shutil import rmtree
 from re import search
 from json import JSONDecoder
 from os import (path, getcwd, walk,
                 sep
                 )
+import hsi
+import xsdb
 
 class Workspace:
     """
@@ -103,7 +107,60 @@ class Workspace:
                 app.set_app_config(key, value)
         return Workspace.SUCCESS
 
+    def get_metadata(self, **kwargs):
+        self.xsa = ""
+        open_xsa = 0
+        ret_metadata = {'arch' : '', 'target_proc' : ''}
+        for key, value in kwargs.items():
+            if key == "xsa":
+                self.xsa = value
+            if key == "open_xsa":
+                open_xsa = 1
+        
+        if open_xsa == 1:
+            if self.xsa != "":
+                print("Info: Using XSA file: " + xsa + " to extract HW metadata using HSI Python API")
+                HwDesign = hsi.HwManager.open_hw_design(xsa)
+                self._ret_metadata['arch'] = HwDesign.FAMILY
+                for proc in HwDesign.get_cells(hierarchical='true',filter='IP_TYPE==PROCESSOR'):
+                    if proc.IP_NAME == "psu_cortexa53" or proc.IP_NAME == "psu_cortexa72" or proc.IP_NAME == "ps7_cortexa9":
+                        self._ret_metadata['target_proc'] = proc.IP_NAME+"_0"
+                        break
+                #HwDesign.close()
+            else:
+                print("Error: No XSA passed. HW metadata will not be extracted.")
+        else:
+            print("Info: no need to open XSA")
+        
+        return self._ret_metadata
+    
     def checkOutSF(self) -> int:
+        def get_metadata(**kwargs):
+            xsa = ""
+            open_xsa = 0
+            ret_metadata = {'arch' : '', 'target_proc' : ''}
+            for key, value in kwargs.items():
+                if key == "xsa":
+                    xsa = value
+                if key == "open_xsa":
+                    open_xsa = 1
+            
+            if open_xsa == 1:
+                if xsa != "":
+                    print("Info: Using XSA file: " + xsa + " to extract HW metadata using HSI Python API")
+                    HwDesign = hsi.HwManager.open_hw_design(xsa)
+                    ret_metadata['arch'] = HwDesign.FAMILY
+                    for proc in HwDesign.get_cells(hierarchical='true',filter='IP_TYPE==PROCESSOR'):
+                        if proc.IP_NAME == "psu_cortexa53" or proc.IP_NAME == "psu_cortexa72" or proc.IP_NAME == "ps7_cortexa9":
+                            ret_metadata['target_proc'] = proc.IP_NAME+"_0"
+                            break
+                    #HwDesign.close()
+                else:
+                    print("Error: No XSA passed. HW metadata will not be extracted.")
+            else:
+                print("Info: no need to open XSA")
+            
+            return ret_metadata
         """
         @Description
         ...
@@ -113,10 +170,17 @@ class Workspace:
         cpu, os to configure domain. Use more pystd lib functions to
         some parts of this file more efficient.
         """
+        dispose()
+
+        print("\n---------------------------------------------------------")
+        print("  Checking out Vitis project to Vitis Unified IDE  ")
+        print("---------------------------------------------------------")
         client = create_client()
+        date = datetime.now().strftime("%Y%m%d%I%M%S")
         script_path = path.dirname(path.abspath(__file__))
         # Strip out cwd which is ~scripts~.
-        ws_path = script_path[:script_path.rfind(sep)] + f"{sep}ws"
+        ws_path = script_path[:script_path.rfind(sep)] + f"{sep}ws" + f"_{date}"
+        repo_path = script_path[:script_path.rfind(sep)] + sep + 'repo'
         # Delete the workspace if already exists.
         if (path.isdir(ws_path)):
             rmtree(ws_path)
@@ -144,9 +208,29 @@ class Workspace:
                     print(f"xsa dirname = {path.basename(dirpath)}")
                     xsa_dirpath_name = path.basename(dirpath)
         print(f"\nDetected one or more applications present: {app_names}")
-        mcu = client.get_processor_os_list(xsa=file)
-        print(f"\nProcessor device family is: {mcu.deviceFamily}")
-        if mcu.deviceFamily == "fpga":
+        
+        ret_metadata = {"arch" : "", "target_proc" : ""}
+
+        start_time = time.time()
+
+        arch_and_cpu_metadata = get_metadata(xsa=file, open_xsa="1")
+
+        arch = arch_and_cpu_metadata['arch']
+        if arch in ('spartan7', 'artix7', 'kintex7'):
+            target_proc = 'microblaze_0'
+        else:
+            target_proc = arch_and_cpu_metadata['target_proc']
+        
+        print("Info: Detected arch: " + arch)
+        print("Info: Using target processor: " + target_proc)
+
+        end_time = time.time()
+        # Measure execution time
+        execution_time = end_time - start_time
+        print(f"Execution time: {execution_time:.4f} seconds")
+        print(f"\nProcessor device family is: {arch}")
+        
+        if arch in ('spartan7', 'artix7', 'kintex7'):
             print("Creating platform component " + xsa_dirpath_name + ".")
             platform = client.create_platform_component(
                 name=xsa_dirpath_name,
@@ -154,15 +238,16 @@ class Workspace:
                 no_boot_bsp=True
             )
             platform.update_desc(desc=xsa_dirpath_name)
-            print("Adding new domain \"domain_microblaze_0\" for cpu: \"microblaze_0\" and OS: \"standalone\"")
+            print(f"Adding new domain \"domain_{target_proc}\" for cpu: \"{target_proc}\" and OS: \"standalone\"")
             domain = platform.add_domain(
-                cpu="microblaze_0",
+                cpu=target_proc,
                 os="standalone",
-                name="domain_microblaze_0",
-                display_name="domain_microblaze_0"
+                name=f"domain_{target_proc}",
+                display_name=f"domain_{target_proc}",
+                support_app = "hello_world"
             )
-            print("Configuring the domain \"domain_microblaze_0\"...")
-            print("BSP settings for the domain \"domain_microblaze_0\"")
+            print(f"Configuring the domain \"domain_{target_proc}\"...")
+            print(f"BSP settings for the domain \"domain_{target_proc}\"")
             # Setting config params for processor and os.
             self.setConfigDomain(
                 domain,
@@ -198,19 +283,46 @@ class Workspace:
                 hw_design=file
             )
             platform.update_desc(desc=xsa_dirpath_name)
-            print("Adding new domain \"domain_ps7_cortexa9_0\" for cpu: \"ps7_cortexa9_0\" and OS: \"standalone\"")
+            print(f"Adding new domain \"domain_{target_proc}\" for cpu: \"{target_proc}\" and OS: \"standalone\"")
             domain = platform.add_domain(
-                cpu="ps7_cortexa9_0",
+                cpu=target_proc,
                 os="standalone",
-                name="domain_ps7_cortexa9_0",
-                display_name="domain_ps7_cortexa9_0"
+                name=f"domain_{target_proc}",
+                display_name=f"domain_{target_proc}",
+                support_app = "hello_world"
             )
-            print("Configuring the domain \"domain_ps7_cortexa9_0\"...")
-            print("BSP settings for the domain \"domain_ps7_cortexa9_0\"")
+            print(f"Configuring the domain \"domain_{target_proc}\"...")
+            print(f"BSP settings for the domain \"domain_{target_proc}\"")
         platform.build()
         print("\n")
-        for driver in domain.get_drivers():
-            print(driver["name"])
+        
+        if arch == "zynquplus":
+            embeddedsw = client.set_embedded_sw_repo(level = 'LOCAL', path = [repo_path])
+            print(f"Adding new domain '{target_proc}_domain_fsbl' for cpu: '{target_proc}' and OS: 'standalone'")
+            zynqmp_fsbl_domain = platform.add_domain(cpu = target_proc, os = 'standalone', name = f'{target_proc}_domain_fsbl', display_name = f'{target_proc}_domain_fsbl', support_app = "zynqmp_fsbl")
+            platform.build()
+            #Generating custom fsbl application from template
+            fsbl_app = client.create_app_component(
+                    name='ZynqMP_FSBL',
+                    platform=client.get_workspace() + os.path.sep +
+                             xsa_dirpath_name + os.path.sep +
+                             "export" + os.path.sep +
+                             xsa_dirpath_name + os.path.sep +
+                             xsa_dirpath_name + ".xpfm",
+                    domain=f"{target_proc}_domain_fsbl",
+                    template="zynqmp_fsbl"
+                    )
+            #platforms = client.list_platform_components()
+            print(f'Platform is located at: {script_path[:script_path.rfind(sep)] + sep + xsa_dirpath_name}')
+            fsbl_app.import_files(
+                    from_loc=client.get_workspace() + sep + xsa_dirpath_name + sep + 'hw' + sep + 'sdt',
+                    files= ['psu_init.c', 'psu_init.h'],
+                    dest_dir_in_cmp="src"
+                )
+            fsbl_app.build()
+            platform.remove_boot_bsp()
+            platform.set_fsbl_elf(path = fsbl_app.component_location + sep + 'build' + sep + 'ZynqMP_FSBL.elf')
+            platform.build()
         for app_name in app_names:
             print(f"Creating application component {app_name}")
             app = client.create_app_component(
@@ -220,8 +332,8 @@ class Workspace:
                          "export" + sep +
                          xsa_dirpath_name + sep +
                          xsa_dirpath_name + ".xpfm",
-                domain="domain_ps7_cortexa9_0",
-                template="hello_world"
+                domain=f"domain_{target_proc}" if arch not in ('spartan7', 'artix7', 'kintex7') else "domain_microblaze_0",
+                template='empty_application'
             )
             # Extract saved settings.
             iRet = self.decJSON_Ws(
@@ -255,10 +367,7 @@ class Workspace:
             for dirpath, dirnames, filenames in walk(app.component_location + sep + "src"):
                 print(filenames)
                 for filename in filenames:
-                    if (filename == "helloworld.c" or
-                        filename == "Xilinx.spec" or
-                        filename == "README.txt"
-                        ):
+                    if (filename in ('Xilinx.spec', 'README.txt')):
                         print(f"\nRemoving {filename} from {path.join(dirpath, filename)}")
                         app.remove_files(files=[app.component_location + sep + "src" + sep + filename])
             # Removing tcl files that should not be there.
@@ -266,7 +375,7 @@ class Workspace:
                 print("")
                 print(filenames)
                 for filename in filenames:
-                    if filename != "ps7_init.tcl":
+                    if (filename not in ('psu_init.tcl', 'ps7_init.tcl')):
                         print(f"\nRemoving {filename} from {path.join(dirpath, filename)}")
                         app.remove_files(files=[app.component_location + sep + "_ide" + sep + "psinit" + sep + filename])
             app.build()
