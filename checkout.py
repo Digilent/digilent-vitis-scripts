@@ -33,6 +33,7 @@ class Workspace:
     SUCCESS = 0
     FAILURE = -1
     COMP_SETTINGS = "comp-settings.json"
+    DEBUG = 0
 
     def __init__(self):
         pass
@@ -106,33 +107,6 @@ class Workspace:
                 ):
                 app.set_app_config(key, value)
         return Workspace.SUCCESS
-
-    def get_metadata(self, **kwargs):
-        self.xsa = ""
-        open_xsa = 0
-        ret_metadata = {'arch' : '', 'target_proc' : ''}
-        for key, value in kwargs.items():
-            if key == "xsa":
-                self.xsa = value
-            if key == "open_xsa":
-                open_xsa = 1
-        
-        if open_xsa == 1:
-            if self.xsa != "":
-                print("Info: Using XSA file: " + xsa + " to extract HW metadata using HSI Python API")
-                HwDesign = hsi.HwManager.open_hw_design(xsa)
-                self._ret_metadata['arch'] = HwDesign.FAMILY
-                for proc in HwDesign.get_cells(hierarchical='true',filter='IP_TYPE==PROCESSOR'):
-                    if proc.IP_NAME == "psu_cortexa53" or proc.IP_NAME == "psu_cortexa72" or proc.IP_NAME == "ps7_cortexa9":
-                        self._ret_metadata['target_proc'] = proc.IP_NAME+"_0"
-                        break
-                #HwDesign.close()
-            else:
-                print("Error: No XSA passed. HW metadata will not be extracted.")
-        else:
-            print("Info: no need to open XSA")
-        
-        return self._ret_metadata
     
     def checkOutSF(self) -> int:
         def get_metadata(**kwargs):
@@ -176,10 +150,14 @@ class Workspace:
         print("  Checking out Vitis project to Vitis Unified IDE  ")
         print("---------------------------------------------------------")
         client = create_client()
-        date = datetime.now().strftime("%Y%m%d%I%M%S")
         script_path = path.dirname(path.abspath(__file__))
-        # Strip out cwd which is ~scripts~.
-        ws_path = script_path[:script_path.rfind(sep)] + f"{sep}ws" + f"_{date}"
+        if Workspace.DEBUG:
+            date = datetime.now().strftime("%Y%m%d%I%M%S")
+            # Strip out cwd which is ~scripts~.
+            ws_path = script_path[:script_path.rfind(sep)] + f"{sep}ws" + f"_{date}"
+        else:
+            # Strip out cwd which is ~scripts~.
+            ws_path = script_path[:script_path.rfind(sep)] + f"{sep}ws"
         repo_path = script_path[:script_path.rfind(sep)] + sep + 'repo'
         # Delete the workspace if already exists.
         if (path.isdir(ws_path)):
