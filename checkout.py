@@ -306,10 +306,10 @@ class Workspace:
             #Generating custom fsbl application from template
             fsbl_app = client.create_app_component(
                     name='ZynqMP_FSBL',
-                    platform=client.get_workspace() + os.path.sep +
-                             xsa_dirpath_name + os.path.sep +
-                             "export" + os.path.sep +
-                             xsa_dirpath_name + os.path.sep +
+                    platform=client.get_workspace() + sep +
+                             xsa_dirpath_name + sep +
+                             "export" + sep +
+                             xsa_dirpath_name + sep +
                              xsa_dirpath_name + ".xpfm",
                     domain=f"{target_proc}_domain_fsbl",
                     template="zynqmp_fsbl"
