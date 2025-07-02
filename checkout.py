@@ -160,10 +160,17 @@ class Workspace:
             # Strip out cwd which is ~scripts~.
             ws_path = script_path[:script_path.rfind(sep)] + f"{sep}ws"
         repo_path = script_path[:script_path.rfind(sep)] + sep + 'repo'
-        # Delete the workspace if already exists.
-        if (path.isdir(ws_path)):
-            shutil.rmtree(ws_path)
-            print(f"Deleted workspace {ws_path}")
+        # Delete the workspace if it already exists.
+        max_try = 10
+        for attempt in range(max_try):
+            try:
+                shutil.rmtree(ws_path)
+                print(f"Deleted workspace {ws_path} on attempt: {attempt+1}.")
+                break
+            except Exception as e:
+                print(f"Attempt {attempt+1} failed: {e}")
+        else:
+            print(f"Failed to delete old workspace.")
         client.set_workspace(ws_path)
         print("Successfully created Vitis client on workspace {}".format(client.get_workspace()))
         app_names = []
