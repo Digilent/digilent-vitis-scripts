@@ -167,10 +167,13 @@ class Workspace:
                 shutil.rmtree(ws_path)
                 print(f"Deleted workspace {ws_path} on attempt: {attempt+1}.")
                 break
+            except FileNotFoundError:
+                print("Old workspace folder was already deleted or does not exist. The checkout script will continue to run unimpeded.")
+                break
             except Exception as e:
                 print(f"Attempt {attempt+1} failed: {e}")
         else:
-            print(f"Failed to delete old workspace.")
+            raise Exception(f"Failed to delete old workspace. Please delete it manually before running the checkout script one more time.")
         client.set_workspace(ws_path)
         print("Successfully created Vitis client on workspace {}".format(client.get_workspace()))
         app_names = []
