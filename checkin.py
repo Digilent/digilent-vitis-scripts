@@ -588,6 +588,7 @@ class Workspace:
         findApplications uses it, but functions should have a limited no. or lines.
         Check description from it.
         """
+        NOT_PATH = -1
         if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
             ((dJsonData["type"] == "HOST" or
               dJsonData["type"] == "HLS") or
@@ -596,12 +597,18 @@ class Workspace:
             # Associate application with its platform.
             appName = pItem[pItem.rfind(sep) + 1:]
             lHwPlt = dJsonData["platform"]
-            # Path to .xpfm file;
+            # This idx has two uses, one for path like values in "platform"
+            # and the second one if there is directly the name of platform.
+            idxIfExXpfm = lHwPlt.rfind(".")
+            # Path to .xpfm file only if it exists, can be used if it's -1 though
             idxPltName = lHwPlt.rfind(sep)
+            if idxPltName == NOT_PATH and idxIfExXpfm == NOT_PATH:
+                # Overwrite if necessary
+                idxIfExXpfm = len(lHwPlt)
             # Pay attention which Utility object is used, bcs encJSON_Ws depends on it.
             relPathPlt = SrcFilesWS.APP_SRCCODE + sep + \
-                            lHwPlt[idxPltName + 1:lHwPlt.rfind(".")] + sep + \
-                            lHwPlt[idxPltName + 1:lHwPlt.rfind(".")] + ".xsa"
+                            lHwPlt[idxPltName + 1:idxIfExXpfm] + sep + \
+                            lHwPlt[idxPltName + 1:idxIfExXpfm] + ".xsa"
             self.cfgWs.utilCfgWs.dPltAppCorr[appName] = relPathPlt
             # Search for buid file.
             bFile = list(Path(pItem).rglob(
