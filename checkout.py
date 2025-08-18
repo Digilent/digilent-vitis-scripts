@@ -391,8 +391,8 @@ class Workspace:
                         print(f"\nRemoving {filename} from {path.join(dirpath, filename)}")
                         app.remove_files(files=[app.component_location + sep + "_ide" + sep + "psinit" + sep + filename])
             app.build()
-            dispose()
-            return Workspace.SUCCESS
+        dispose()
+        return Workspace.SUCCESS
 
 if __name__ == "__main__":
     """
