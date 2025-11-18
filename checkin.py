@@ -2,7 +2,7 @@
 """
     Company: Digilent RO
     Engineer: bs
-    Usage: for vitis projects
+    Usage: Vitis projects
     
     @Description
     This checkin.py has the same behavior
@@ -11,10 +11,12 @@
     
     @Insights
     Vitis v2024.1 has Python v3.8.3.
+    Vitis v2025.1 has Python v3.13.0.
 """
 from os import (chdir, getcwd, listdir,
                 path, sep, makedirs, mkdir,
-                access, F_OK, SEEK_END)
+                access, chmod, R_OK, W_OK)
+from stat import (S_IWUSR, S_IRUSR)
 from vitis import (_build, _server)
 from pathlib import Path
 from shutil import copy
@@ -52,7 +54,7 @@ class UtilityWS:
                  ]
     IS_DIRS = False
 
-    def __init__(self):
+    def __init__(self, sIP="", sPort=""):
         """
         @Description
         This file has its location directory as the starting point,
@@ -89,14 +91,18 @@ class UtilityWS:
         self.enJsonObjFile = JSONEncoder(indent="\t", separators=(",", " : "))
         # Check for src and ws dirs.
         lcWsDir = path.join(self._pSubSw, self._appDir)
+        # Server attributes can be used to attach to an existing server made
+        # with Server class from vitis._server.
+        self.sIP = sIP
+        self.sPort = sPort
         if path.isdir(self._srcDir) and path.isdir(self._appDir):
             if UtilityWS.srvCl is None:
                 try:
                     LOG(msg="Local server, starting Vitis server...")
                     # Init server with pre-defined args.
                     UtilityWS.srvCl = _server.Server(
-                        port=None,
-                        host="localhost",
+                        port=None if self.sIP == "" else self.sIP,
+                        host="localhost" if self.sPort == "" else self.sPort,
                         workspace=lcWsDir
                         )
                     UtilityWS.IS_DIRS = True
@@ -376,10 +382,22 @@ class SrcFilesWS:
                     makedirs(dTempLoc)
                     if itemIdx < dimLsArchFl: 
                         mkdir(self.lsArchPltDir[itemIdx])
-                # Should we use copy2 to preserve metadata instead of copy ?
-                copy(self.lsBldFl[itemIdx], dTempLoc)
-                if itemIdx < dimLsArchFl:
-                    copy(self.lsArchFl[itemIdx], self.lsArchPltDir[itemIdx])
+                # Impose read and write access for current files.
+                chmod(self.lsBldFl[itemIdx], S_IRUSR | S_IWUSR)
+                # Check for write protected file in self.lsBldFl.
+                if access(self.lsBldFl[itemIdx], R_OK | W_OK):
+                    # Should we use copy2 to preserve metadata instead of copy ?
+                    copy(self.lsBldFl[itemIdx], dTempLoc)
+                    if itemIdx < dimLsArchFl:
+                        # Impose read and write access for current files.
+                        chmod(self.lsArchFl[itemIdx], S_IRUSR | S_IWUSR)
+                        # Check for write protected file in self.lsArchFl.
+                        if access(self.lsArchFl[itemIdx], R_OK | W_OK):
+                            copy(self.lsArchFl[itemIdx], self.lsArchPltDir[itemIdx])
+                        else:
+                            LOG(f"File {self.lsArchFl[itemIdx]} is not writable and readable")
+                else:
+                    LOG(f"File {self.lsBldFl[itemIdx]} is not writable and readable")
                 # tuple(<app-dirname-src>, <app-dirname>)
                 iRet = self.cpySrcFiles(itemIdx, lApps, (dTempLoc, strTempLoc))
             # Handoff (xsa) and build script files have been copied, src files too.
@@ -433,13 +451,25 @@ class SrcFilesWS:
                     nLoc = path.join(loc, srcDirLoc)
                     if path.isdir(nLoc) is not True:
                         mkdir(nLoc)
-                    copy(subItem, nLoc)
+                    # Impose read and write access for current files.
+                    chmod(subItem, S_IRUSR | S_IWUSR)
+                    # Check for write protected file
+                    if access(subItem, R_OK | W_OK):
+                        copy(subItem, nLoc)
+                    else:
+                        LOG(f"File {subItem} is not writeable and readable")
                     continue
-                # Prefix - other misc files can exist ... tp(".","")
-                if miscFileName.startswith("."):
-                    copy(subItem, locFMisc)
+                # Impose read and write access for current files.
+                chmod(subItem, S_IRUSR | S_IWUSR)
+                # Check for write protected file
+                if access(subItem, R_OK | W_OK):
+                    # Prefix - other misc files can exist ... tp(".","")
+                    if miscFileName.startswith("."):
+                        copy(subItem, locFMisc)
+                    else:
+                        copy(subItem, loc)
                 else:
-                    copy(subItem, loc)
+                    LOG(f"File {subItem} is not writeable and readable")
         return SrcFilesWS.SUCCESS
 
     @property
