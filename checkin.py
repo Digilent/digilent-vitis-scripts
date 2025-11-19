@@ -531,6 +531,7 @@ class Workspace:
         Both have setters/getters methods that are used to access various class dependent
         attributes (SrcFilesWS or ConfigWS) by reference, not redundant copies.
         """
+        self.idxApp = 0
         self.sfWs = SrcFilesWS()
         # pattern vector; /i -> case insensitive;
         self.lsExcludedApps = [compile("fsbl", RegexFlag.IGNORECASE)]
@@ -544,8 +545,7 @@ class Workspace:
             LOG("All files have been collected!")
 
     def gatherAppSrcCd(self,
-                       pSrcFl : str,
-                       idxApp : int
+                       pSrcFl : str
                        ):
         """
         @Description
@@ -561,17 +561,17 @@ class Workspace:
         chdir(pSrcFlLoc)
         # Can store not just SrcFilesWS.lsSrcCpy '*.<some-extension>'.
         for item in SrcFilesWS.lsSrcCpy:
-            srcFiles = list(Path(pSrcFlLoc).rglob(item))
+            # rglob has case_sensitive parameter from py v3.12.
+            srcFiles = list(Path(pSrcFlLoc).rglob(item, case_sensitive=True))
             if len(srcFiles) != UtilityWS.EMPTY_BUFFER:
                 # [[]] - type
-                self.sfWs.lsTempSrcFl[idxApp].append([str(itm) for itm in srcFiles])
+                self.sfWs.lsTempSrcFl[self.idxApp].append([str(itm) for itm in srcFiles])
         # [[App1],[App2],[App3], ...], where App1,App2,App3 are other lists with
         # paths of source files that need to be copied.
         chdir(pCwd)
 
     def gatherAppOtherConf(self,
                            pSrcFl : str,
-                           idxApp : int,
                            repflOpt : bool = False
                            ):
         """
@@ -583,17 +583,15 @@ class Workspace:
 
         @Parameters
         pSrcFl: Path to src dir from <app-dir>.
-        idxApp: Index for an application component, lsTempSrcFl from
-                sfWs stores all of them from workspace.
         repflOpt: By default it is on '0', this avoids storing
                   files like .gitignore, but others can be added/ignored.
         """
-        if len(self.sfWs.lsTempSrcFl[idxApp]) != UtilityWS.EMPTY_BUFFER:
+        if len(self.sfWs.lsTempSrcFl[self.idxApp]) != UtilityWS.EMPTY_BUFFER:
             # Source files should have been stored by now.
             if repflOpt:
                 pGIgn = path.join(pSrcFl, SrcFilesWS.lsConfCpy[-1])
                 if path.exists(pGIgn) is True:
-                    self.sfWs.lsTempSrcFl[idxApp].append([pGIgn])
+                    self.sfWs.lsTempSrcFl[self.idxApp].append([pGIgn])
             pSrcFlLoc = path.join(pSrcFl, SrcFilesWS.APP_SRCCODE)
             pCwd = getcwd()
             chdir(pSrcFlLoc)
@@ -602,11 +600,10 @@ class Workspace:
                 srcFiles = list(Path(pSrcFlLoc).rglob(item))
                 if len(srcFiles) != UtilityWS.EMPTY_BUFFER:
                     # [[]] - type
-                    self.sfWs.lsTempSrcFl[idxApp].append([str(itm) for itm in srcFiles])
+                    self.sfWs.lsTempSrcFl[self.idxApp].append([str(itm) for itm in srcFiles])
             chdir(pCwd)
 
     def processGatherFiles(self,
-                           idxApp : int,
                            cmpFile : list,
                            dJsonData : dict,
                            pItem : str,
@@ -650,9 +647,9 @@ class Workspace:
                 self.sfWs.lsBldFl.append(path.join(pItem, str(bFile[SrcFilesWS.BUILD_FILE_IDX])))
                 self.sfWs.lsTempSrcFl.append([])
                 # Collect source files from <app-dir>/src.
-                self.gatherAppSrcCd(pItem, idxApp)
-                self.gatherAppOtherConf(pItem, idxApp)
-                idxApp = idxApp + 1
+                self.gatherAppSrcCd(pItem)
+                self.gatherAppOtherConf(pItem)
+                self.idxApp = self.idxApp + 1
 
     def findApplications(self) -> list:
         """
@@ -667,7 +664,7 @@ class Workspace:
         casted to a vector/list obj. Therefore, indexing the wanted element,
         such as CMakeLists.txt or *.json.
         
-        Apps are counted with idxApp and passed to self.gatherAppOtherConf,
+        Apps are counted with self.idxApp and passed to self.gatherAppOtherConf,
         Some sort of correlation can be done to know which app has a certain
         platform. With a JSONDecoder, file-buffer is read then passed to
         <jsondecoder-obj>.decode func to get {[keys...] : [values...]} struct.
@@ -679,7 +676,6 @@ class Workspace:
         # Store apps build files.
         lsDirApps = []
         pCwd = getcwd()
-        idxApp = 0
         for item in listdir(pCwd):
             if path.isdir(item) is False or item.startswith("."): continue
             # Get build file ~ maybe check if it exists ?
@@ -697,7 +693,7 @@ class Workspace:
             mtName = self.lsExcludedApps[0].search(dJsonData["name"])
             if mtName is not None: continue
             # Pass parameters by ref with the same names.
-            iRet = self.processGatherFiles(idxApp, cmpFile, dJsonData, pItem, lsDirApps)
+            iRet = self.processGatherFiles(cmpFile, dJsonData, pItem, lsDirApps)
         # Get back to 'sw submodule'.
         chdir(self.sfWs.pSubSw)
         LOG("Number of applications found: " + str(len(lsDirApps)))
