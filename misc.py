@@ -47,7 +47,9 @@ def MapCmdLineOpts(opt=OPT_CHECKIN, kwCLO={}):
     in any possible order.
     """
     lsEntries = ["--port", "--ip", "--fastsave", "--outputfile"]
-    
+    for itm in lsEntries:
+        kwCLO[itm] = ""
+
     if len(argv) > 1:
         parser = ArgumentParser(
                     description="Checkin options" if opt == OPT_CHECKOUT else
@@ -64,8 +66,6 @@ def MapCmdLineOpts(opt=OPT_CHECKIN, kwCLO={}):
             attr = getattr(args, sTmp)
             if attr is not None:
                 kwCLO[lsEntries[idx]] = attr
-            else:
-                kwCLO[lsEntries[idx]] = ""
 
 def LOG(msg="",
         format="%(asctime)s %(levelname)s : %(message)s",
