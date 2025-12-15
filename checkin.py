@@ -22,7 +22,7 @@ from pathlib import Path
 from shutil import copy
 from json import (JSONEncoder, JSONDecoder)
 from re import (compile, RegexFlag)
-from misc import LOG
+from misc import (LOG, MapCmdLineOpts)
 
 class UtilityWS:
     """
@@ -53,6 +53,7 @@ class UtilityWS:
                  "applicationFlow"
                  ]
     IS_DIRS = False
+    SET_IP_PORT = False
 
     def __init__(self, sIP="", sPort=""):
         """
@@ -91,18 +92,23 @@ class UtilityWS:
         self.enJsonObjFile = JSONEncoder(indent="\t", separators=(",", " : "))
         # Check for src and ws dirs.
         lcWsDir = path.join(self._pSubSw, self._appDir)
+        self.kwCLO = {}
+        # Extract cmd line parameters into kwCLO.
+        MapCmdLineOpts(kwCLO=self.kwCLO)
+        self.sIP = self.kwCLO["--ip"] if sIP == "" else sIP
+        self.sPort = self.kwCLO["--port"] if sPort == "" else sPort
+        if self.sIP != "" or self.sPort != "":
+            UtilityWS.SET_IP_PORT = True
         # Server attributes can be used to attach to an existing server made
         # with Server class from vitis._server.
-        self.sIP = sIP
-        self.sPort = sPort
         if path.isdir(self._srcDir) and path.isdir(self._appDir):
             if UtilityWS.srvCl is None:
                 try:
                     LOG(msg="Local server, starting Vitis server...")
                     # Init server with pre-defined args.
                     UtilityWS.srvCl = _server.Server(
-                        port=None if self.sIP == "" else self.sIP,
-                        host="localhost" if self.sPort == "" else self.sPort,
+                        port=None if self.sPort == "" else self.sPort,
+                        host="localhost" if self.sIP == "" else self.sIP,
                         workspace=lcWsDir
                         )
                     UtilityWS.IS_DIRS = True
@@ -758,7 +764,9 @@ class Workspace:
             return UtilityWS.FAILURE
         iRet = self.sfWs.collectCpyFiles(self.cfgWs.refLApps)
         iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
-        UtilityWS.srvCl.stop()
+        # Check if port or ip have been assigned manually.
+        if not UtilityWS.SET_IP_PORT:
+            UtilityWS.srvCl.stop()
         # Clean up .wsdata after vitis-server shutdown if it exists.
         return iRet
 
