@@ -1,3 +1,4 @@
+
 @echo off
 rem save current working directory
 pushd %~dp0
@@ -15,6 +16,7 @@ attrib +R .\cleanup.sh
 attrib +R .\cleanup.cmd
 attrib +R .\checkin.py
 attrib +R .\checkout.py
+attrib +R .\misc.py
 attrib +R .\LICENSE
 attrib +R .\README.md
 

@@ -1,3 +1,4 @@
+
 # This script is useful for cleaning up the 'project'
 # directory of a Digilent Vitis-project git repository
 ###
@@ -16,6 +17,7 @@ find $script_dir -type f ! -name 'cleanup.sh'  \
 			 ! -name 'cleanup.cmd' \
 			 ! -name 'checkin.py'  \
 			 ! -name 'checkout.py' \
+			 ! -name 'misc.py'	   \
 			 ! -name 'LICENSE'     \
 			 ! -name 'README.md'   \
 			   -exec rm -rf {} +
