@@ -46,11 +46,14 @@ def GetMetadata(**kwargs):
     if open_xsa == 1:
         if xsa != "":
             print("Info: Using XSA file: " + xsa + " to extract HW metadata using HSI Python API")
+            #  xv_pycommontasks - py extension module (on win)
+            #  xv_hsmpytasks - py extension module (on win)
             HwDesign = hsi.HwManager.open_hw_design(xsa)
             ret_metadata["arch"] = HwDesign.FAMILY
             for proc in HwDesign.get_cells(hierarchical="true", filter="IP_TYPE==PROCESSOR"):
-                if (proc.IP_NAME == "psu_cortexa53" or
-                    proc.IP_NAME == "psu_cortexa72" or
+                if ((proc.IP_NAME == "psu_cortexa53" or
+                     proc.IP_NAME == "psu_cortexa72" or
+                     proc.IP_NAME == "psu_cortexr5") or
                     proc.IP_NAME == "ps7_cortexa9"
                     ):
                     ret_metadata["target_proc"] = proc.IP_NAME + "_0"
