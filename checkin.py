@@ -166,11 +166,23 @@ class UtilityWS:
         obj: The type of this item is dependent on vitis-py resources,
              it consists of a nested data structure.
         """
+        # The separator used is similar to lnx platforms for item.value items.
+        PTRN_EX = compile("../", RegexFlag.IGNORECASE)
         # Extract from a protobuff class metadata.
         for item in obj.settings:
             if len(item.value) != UtilityWS.EMPTY_BUFFER:
                 # Every value-obj has just one element in its list ? ... some maybe not.
-                valLoc = item.value.__getitem__(0)
+                if len(item.value) == 1:
+                    valLoc = item.value.__getitem__(0)
+                else:
+                    # Copy this list to add to self.dConfWs.
+                    valLoc = item.value[:]
+                    iDel = 0
+                    dimValLoc = len(valLoc)
+                    for idx in range(0, dimValLoc):
+                        if PTRN_EX.search(valLoc[idx]) is not None:
+                            iDel += 1
+                    del valLoc[dimValLoc - iDel:]
                 self.dConfWs[item.key] = valLoc if type(valLoc) is list else [valLoc]
             else:
                 self.dConfWs[item.key] = []
@@ -637,7 +649,7 @@ class Workspace:
                             lHwPlt[idxPltName + 1:idxIfExXpfm] + sep + \
                             lHwPlt[idxPltName + 1:idxIfExXpfm] + ".xsa"
             self.cfgWs.utilCfgWs.dPltAppCorr[appName] = relPathPlt
-            # Search for buid file.
+            # Search for build file.
             bFile = list(Path(pItem).rglob(
                             SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX]))
             # Just one element should be in the list.
