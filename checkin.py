@@ -443,10 +443,14 @@ class SrcFilesWS:
         on False implicitly). Each file type is stored into a list, which will be
         iterated over with below 2x for structure.
 
-        rfind + slices (idxLeft:idxRight) are used to get directories that need
-        to be created for header files into <app-dirname-src>, if not they are
-        overwritten anyway. In case of directories, if they have been already
-        created, then calling `mkdir` or `makedirs` like functions are avoided.
+        path.relpath against <app-dir-src> (lApps[appIdx] + APP_SRCCODE) is used to
+        recover the *full* subdirectory chain that needs to be recreated under
+        <app-dirname-src>, no matter how many levels deep a file is nested
+        (e.g. src/tac5x1x_tac5142/<any-further-nesting>/tac5x1x_tac5142.c),
+        not just the immediate parent dir. makedirs (instead of mkdir) is used
+        since more than one intermediate directory level may need to be created
+        at once. If directories have been already created, then calling
+        `makedirs` is avoided.
 
         @Parameters
         appIdx: integer for App(s) files.
@@ -456,19 +460,22 @@ class SrcFilesWS:
         # item ~ list
         # e.g. appIdx=0 is for App1.
         loc, locFMisc = locDuo
+        appSrcRoot = path.join(lApps[appIdx], SrcFilesWS.APP_SRCCODE)
         for item in self._lsTempSrcFl[appIdx]:
             for subItem in item:
-                # Take all files from each sublist and copy them,
-                # suppose only one dir is between <app-dir-src> and a header file.
-                lastMarkerPos = subItem.rfind(sep)
-                miscFileName = subItem[lastMarkerPos + 1:]
-                trimSubItem = subItem[:lastMarkerPos]
-                prevLastMarkerPos = trimSubItem.rfind(sep) + 1
-                srcDirLoc = subItem[prevLastMarkerPos:lastMarkerPos]
-                if srcDirLoc != SrcFilesWS.APP_SRCCODE and srcDirLoc != locFMisc:
-                    nLoc = path.join(loc, srcDirLoc)
+                # Take all files from each sublist and copy them, preserving
+                # any nr of nested dirs found between <app-dir-src> and a file.
+                miscFileName = subItem[subItem.rfind(sep) + 1:]
+                if subItem.startswith(appSrcRoot + sep):
+                    relDirLoc = path.dirname(path.relpath(subItem, appSrcRoot))
+                else:
+                    # File is not under <app-dir>/src (e.g. .gitignore sitting
+                    # directly in <app-dirname>), handled by the misc case below.
+                    relDirLoc = ""
+                if relDirLoc not in ("", "."):
+                    nLoc = path.join(loc, relDirLoc)
                     if path.isdir(nLoc) is not True:
-                        mkdir(nLoc)
+                        makedirs(nLoc)
                     # Impose read and write access for current files.
                     chmod(subItem, S_IRUSR | S_IWUSR)
                     # Check for write protected file
