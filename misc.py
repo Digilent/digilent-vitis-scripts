@@ -114,49 +114,55 @@ def CkFileOpenBlock(filename : str,
     workspace root dir.
     """
     # Check if file exits.
-    if not access(filename, F_OK):
+    if not os.access(filename, os.F_OK):
         # File doesn't exist.
         return FNEXIST
     
     if osName == "Windows":
-        # Refs
-        # _sopen_s = cdll.msvcrt._sopen_s
         _close = cdll.msvcrt._close
         _locking = cdll.msvcrt._locking
         _filelength = cdll.msvcrt._filelength
-        # _get_errno = cdll.msvcrt._get_errno
         # Win CRT in general returns 0 if any error did not occur.
-        _FSC = 0
         _LK_UNLCK = 0x0
-        # _SH_DENYRW, _SH_NOPEN = 0x10, 0x11
-        # _O_RDONLY, _S_IREAD = 0x0, 0x0100
-        _O_RDONLY = 0x0
-        # _SH_DENYWR = 0x20
-        # _sopen 'gives back' a descriptor, but only -1; fHnd
-        # erRet = _sopen_s(fHnd.value, filename, _O_RDONLY)
+        _LK_NBLCK = 0x2
         with open(filename, "r") as lcFile:
             fHnd = lcFile.fileno()
-            isRd = lcFile.readable()
-            if isRd:
-                # ln = _filelength(fHnd)
-                _locking(fHnd, _LK_UNLCK, 0)
-                _close(fHnd)
-                # File is not opened by anyone else.
+            # Lock at least 1 byte (locking 0 bytes never contends) in
+            # non-blocking mode: this only succeeds if no other process
+            # currently holds a lock on this file.
+            nBytes = max(_filelength(fHnd), 1)
+            try:
+                _locking(fHnd, _LK_NBLCK, nBytes)
+            except OSError:
+                # Another process holds a lock on this file.
+                return FOPEN
+            else:
+                # We got the lock ourselves - release it right away and
+                # report that nobody else had this file open.
+                _locking(fHnd, _LK_UNLCK, nBytes)
                 return FNOPEN
     elif osName == "Linux" or osName == "Darwin":
         # This module comes only on Unix like platforms.
-        from fcntl import (lockf, LOCK_UN)
+        from fcntl import (lockf, LOCK_EX, LOCK_NB, LOCK_UN)
         # Get file descriptor.
         with open(filename, "r") as lcFile:
             lcFd = lcFile.fileno()
-            # Unlock file directly.
+            # Attempt a non-blocking exclusive lock to test whether some
+            # other process currently holds a lock on this file.
             try:
-                lockf(lcFd, LOCK_UN, SEEK_END)
-                return FNOPEN
+                lockf(lcFd, LOCK_EX | LOCK_NB)
+            except BlockingIOError:
+                # Another process holds a lock on this file.
+                return FOPEN
             except OSError as err:
                 # Interpret error from lockf in some way.
                 LOG(msg=f"{err.__cause__}" + f"{err.__context__}")
                 return FLOCKERR
+            else:
+                # We got the lock ourselves - release it right away and
+                # report that nobody else had this file open.
+                lockf(lcFd, LOCK_UN)
+                return FNOPEN
     else:
         LOG("This OS: " + osName + " is not supported!")
 
@@ -236,6 +242,9 @@ def findVitisRoot(version : str, configuredInstallPath : str = "") -> str:
 
     if configuredInstallPath:
         configuredInstallPath = os.path.abspath(configuredInstallPath)
+        # configuredInstallPath may already be the "...\Vitis" root itself
+        # (as documented for -InstallPath/-i), so check that directly too.
+        candidates.append(os.path.join(configuredInstallPath, "bin", exeName))
         candidates += _vitisLayoutCandidates(configuredInstallPath, version, exeName)
         candidates += _vitisLayoutCandidates(os.path.dirname(configuredInstallPath), version, exeName)
 
@@ -421,11 +430,18 @@ def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> li
             if not pidStr.isdigit():
                 continue
             pid = int(pidStr)
-            if name in genericNames:
-                if not vitisRoot or not exePath:
+            if vitisRoot:
+                # An install root is known: scope every matched name
+                # (including the otherwise-unambiguous "vitis"/
+                # "vitis-server") to it, so a different Vitis version's
+                # processes are never touched.
+                if not exePath or not os.path.normcase(exePath).startswith(os.path.normcase(os.path.abspath(vitisRoot))):
                     continue
-                if not os.path.normcase(exePath).startswith(os.path.normcase(os.path.abspath(vitisRoot))):
-                    continue
+            elif name in genericNames:
+                # No install root given: generic names are inherently
+                # ambiguous, so skip them entirely rather than risk
+                # matching an unrelated app.
+                continue
             if startedBefore is not None and createdStr:
                 try:
                     from datetime import datetime
@@ -447,12 +463,19 @@ def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> li
             if name not in VITIS_PROC_NAMES_LNX:
                 continue
             pid = int(pidStr)
-            if name in genericNames:
-                if not vitisRoot:
-                    continue
+            if vitisRoot:
+                # An install root is known: scope every matched name
+                # (including the otherwise-unambiguous "vitis"/
+                # "vitis-server") to it, so a different Vitis version's
+                # processes are never touched.
                 exePath = os.path.realpath(f"/proc/{pid}/exe")
                 if not exePath.startswith(os.path.abspath(vitisRoot)):
                     continue
+            elif name in genericNames:
+                # No install root given: generic names are inherently
+                # ambiguous, so skip them entirely rather than risk
+                # matching an unrelated app.
+                continue
             if startedBefore is not None and len(parts) == 3:
                 try:
                     from datetime import datetime
@@ -504,7 +527,11 @@ def stopDanglingVitisProcesses(vitisRoot : str = "", startedBefore : float = Non
                 cmd = ["taskkill", "/PID", str(pid)]
                 if force:
                     cmd.append("/F")
-                subprocess.run(cmd, capture_output=True)
+                result = subprocess.run(cmd, capture_output=True)
+                if result.returncode != 0:
+                    LOG(f"Failed to stop process {name} (pid={pid}): "
+                        f"{result.stderr.decode(errors='replace').strip()}")
+                    continue
             else:
                 from signal import SIGKILL, SIGTERM
                 os.kill(pid, SIGKILL if force else SIGTERM)
