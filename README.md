@@ -12,7 +12,7 @@ for development of `projects`.
 
 `git submodule add https://github.com/Digilent/digilent-vitis-scripts scripts`
 
-`git checkout new_vitis/master`
+`git -C scripts checkout new_vitis/master`
 
 **Note #2:**
 *The checkout/checkin scripts need to have `src` directory in the same folder as the*
