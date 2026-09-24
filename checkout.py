@@ -534,6 +534,7 @@ class Workspace:
         ws_path: absolute path to the (already existing) workspace directory.
         """
         makedirs(ws_path, exist_ok=True)
+        self._ensureParentGitignore(ws_path)
         self._setWorkspaceWithRetry(client, ws_path)
         self._wsPath = ws_path
         self._buildLogPath = path.join(ws_path, "checkout_build.log")
@@ -599,7 +600,16 @@ class Workspace:
                 platform_name = path.splitext(path.basename(xsa_path))[0]
                 if platform_name in used_names:
                     hw_pf_name = path.basename(hw_pf_dir)
-                    platform_name = f"{hw_pf_name}_{platform_name}"
+                    candidate_name = f"{hw_pf_name}_{platform_name}"
+                    # Keep disambiguating until unique: the hw_pf-prefixed
+                    # name can itself collide (e.g. "dir_foo.xsa" alongside
+                    # "dir/foo.xsa" both resolve to "dir_foo"), and creating
+                    # a second component with the same name would fail.
+                    suffix = 2
+                    while candidate_name in used_names:
+                        candidate_name = f"{hw_pf_name}_{platform_name}_{suffix}"
+                        suffix += 1
+                    platform_name = candidate_name
                     LOG(f"Platform name collision on xsa stem for {xsa_path}, "
                        f"disambiguating as \"{platform_name}\"")
                 used_names.add(platform_name)
@@ -777,7 +787,14 @@ class Workspace:
             lang_flags = cacheVar(toolchain_var)
             if lang_flags is None:
                 continue
-            fixed_value = f"{lang_flags} {dep_flags} -specs={specs_file} -I{include_path}"
+            fixed_value = f"{lang_flags} {dep_flags} -specs={specs_file}"
+            # Omit the include option entirely when there's no path: a bare
+            # trailing "-I" with nothing after it makes the compiler
+            # consume the next command-line token as the include dir (or
+            # report a missing argument), turning this fix-up into another
+            # build failure.
+            if include_path:
+                fixed_value += f" -I{include_path}"
             if cacheVar(f"CMAKE_{lang}_FLAGS") == fixed_value:
                 continue
             # fixed_value can contain Windows paths with backslashes; a
@@ -1545,6 +1562,16 @@ class Workspace:
                     # "succeeds" having rebuilt nothing for a typo'd name.
                     LOG(f"Unknown --platform value(s) {sorted(unknown_platforms)}: "
                        f"no such platform among {sorted(known_platform_names)}.")
+                    return Workspace.FAILURE
+                unknown_apps = apps - set(app_names)
+                if unknown_apps:
+                    # Same reasoning as unknown_platforms above: an unknown
+                    # --app value would otherwise reach
+                    # _resolveSelectiveTargets, which opens
+                    # src/<value>/comp-settings.json directly and raises an
+                    # unhandled FileNotFoundError instead of failing cleanly.
+                    LOG(f"Unknown --app value(s) {sorted(unknown_apps)}: "
+                       f"no such application among {sorted(app_names)}.")
                     return Workspace.FAILURE
                 platforms, apps = self._resolveSelectiveTargets(
                     platforms, apps, app_names, hw_platforms, repo_root
