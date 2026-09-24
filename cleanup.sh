@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env bash
 
 # This script is useful for cleaning up the 'project'
 # directory of a Digilent Vitis-project git repository
