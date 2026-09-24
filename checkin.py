@@ -487,6 +487,12 @@ class SrcFilesWS:
             for subItem in item:
                 if subItem.startswith(appSrcRoot + sep):
                     keepRelPaths.add(path.relpath(subItem, appSrcRoot))
+        # collectCpyFiles already (re)copied this app's build file (e.g.
+        # CMakeLists.txt) directly into loc, right before calling this
+        # function - it lives outside _lsTempSrcFl, so without this it
+        # would immediately be treated as "no longer present" and deleted
+        # by the pruning loop below on every check-in.
+        keepRelPaths.add(path.basename(self.lsBldFl[appIdx]))
         if path.isdir(loc):
             for dirpath, _, filenames in walk(loc):
                 for filename in filenames:
