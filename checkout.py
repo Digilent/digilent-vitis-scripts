@@ -432,16 +432,19 @@ class Workspace:
         over it) and still holding ws_path's own lock file
         ("_ide/.wsdata/.lock"), which makes set_workspace fail with
         "the workspace '...' is already in use" (FAILED_PRECONDITION) even
-        though the process that created it is long gone. On failure, stops
-        any dangling Vitis process (stopDanglingVitisProcesses, only if
-        self._allowProcessCleanup was explicitly opted into - see
-        checkOutSF's allow_process_cleanup) and removes
-        the stale lock file itself (killing the process alone does not
-        always delete it, since it may not get a chance to clean up on a
-        forceful stop), then retries a bounded number of times. Shared by
-        _prepareWorkspace and _openExistingWorkspace so neither codepath
-        needs the user to manually stop dangling processes/delete the lock
-        file before every run.
+        though the process that created it is long gone. On failure, ONLY IF
+        self._allowProcessCleanup was explicitly opted into (see checkOutSF's
+        allow_process_cleanup), stops any dangling Vitis process
+        (stopDanglingVitisProcesses) and removes the stale lock file itself
+        (killing the process alone does not always delete it, since it may
+        not get a chance to clean up on a forceful stop), then retries a
+        bounded number of times. Without that opt-in, neither the process
+        nor the lock file is touched - a "workspace already in use" failure
+        can legitimately mean another active IDE session owns it, and
+        deleting the lock blindly could let two sessions use the workspace
+        concurrently. Shared by _prepareWorkspace and _openExistingWorkspace
+        so neither codepath needs the user to manually stop dangling
+        processes/delete the lock file before every run.
 
         @Parameters
         client: Vitis client obj returned by create_client().
@@ -460,16 +463,19 @@ class Workspace:
                         stopped = stopDanglingVitisProcesses(environ.get("XILINX_VITIS", ""), _PROCESS_START_TIME)
                         if stopped:
                             LOG(f"Stopped dangling Vitis process(es) holding the workspace: {stopped}")
+                        if path.isfile(lock_path):
+                            try:
+                                remove(lock_path)
+                                LOG(f"Removed stale workspace lock file: {lock_path}")
+                            except OSError as lock_err:
+                                LOG(f"Failed to remove stale lock file {lock_path}: {lock_err}")
                     else:
-                        LOG("Not stopping any Vitis process automatically (pass "
-                            "allow_process_cleanup/--allow-process-cleanup to enable this "
-                            "if you know no other Vitis session is active on this machine).")
-                    if path.isfile(lock_path):
-                        try:
-                            remove(lock_path)
-                            LOG(f"Removed stale workspace lock file: {lock_path}")
-                        except OSError as lock_err:
-                            LOG(f"Failed to remove stale lock file {lock_path}: {lock_err}")
+                        LOG("Not stopping any Vitis process nor removing the workspace lock "
+                            "file automatically (pass allow_process_cleanup/"
+                            "--allow-process-cleanup to enable this if you know no other "
+                            "Vitis session is active on this machine) - a normal 'workspace "
+                            "already in use' failure can mean another active IDE genuinely "
+                            "owns this lock.")
                     time.sleep(1)
         raise Exception(f"Failed to set workspace {ws_path} even after stopping dangling Vitis "
                         "processes and removing any stale lock file. Please investigate manually.")
@@ -1659,3 +1665,5 @@ if __name__ == "__main__":
         incremental=args.incremental,
         allow_process_cleanup=args.allow_process_cleanup
         )
+    LOG("Checkout finished with status: " + str(iRet))
+    sys.exit(iRet)
