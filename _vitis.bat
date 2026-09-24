@@ -67,11 +67,17 @@ rem against this file's own directory (%SELF_DIR%), not the working
 rem directory, so checkin.py/checkout.py are found even when invoked from
 rem anywhere else in (or outside) the repo. checkin.py/checkout.py then
 rem locate src/ws the same CWD-independent way, via their own __file__.
+rem A path is already rooted (and must be left alone) if it has a drive
+rem letter ("C:\..."), is a UNC path ("\\server\share\...") or is rooted on
+rem the current drive ("\dir\..."/"/dir/..."), so check the first two
+rem characters instead of assuming only "C:\..." counts as absolute.
 set "SCRIPT_COLON="
+set "SCRIPT_FIRSTCHAR="
 if defined SCRIPT (
     set "SCRIPT_COLON=%SCRIPT:~1,1%"
+    set "SCRIPT_FIRSTCHAR=%SCRIPT:~0,1%"
 )
-if defined SCRIPT if not "%SCRIPT_COLON%"==":" set "SCRIPT=%SELF_DIR%%SCRIPT%"
+if defined SCRIPT if not "%SCRIPT_COLON%"==":" if not "%SCRIPT_FIRSTCHAR%"=="\" if not "%SCRIPT_FIRSTCHAR%"=="/" set "SCRIPT=%SELF_DIR%%SCRIPT%"
 
 rem Same rename AMD did for Vivado (Xilinx -^> AMDDesignTools) applies to Vitis.
 set "VITIS_ROOT="
