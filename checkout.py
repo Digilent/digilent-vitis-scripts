@@ -416,11 +416,22 @@ class Workspace:
         destroys repo-tracked files living inside the otherwise fully
         git-ignored workspace folder (see PRESERVED_WS_ENTRIES).
 
+        When ws_path does not exist yet (a genuinely fresh checkout, e.g. a
+        parent repository that has never run checkout.py before), the
+        ".keep" placeholder documented in README Note #3 (and negated by
+        _ensureParentGitignore) is created here too, instead of only ever
+        being preserved if it already happened to exist: otherwise a brand
+        new setup would never get a trackable file under ws/ at all, since
+        nothing else creates one.
+
         @Parameters
         ws_path: absolute path to the workspace directory to clear.
         """
         if not path.isdir(ws_path):
             makedirs(ws_path, exist_ok=True)
+            keep_path = path.join(ws_path, ".keep")
+            if not path.isfile(keep_path):
+                open(keep_path, "a", encoding="utf-8").close()
             return
         for entry in listdir(ws_path):
             if entry in self.PRESERVED_WS_ENTRIES:
@@ -455,6 +466,17 @@ class Workspace:
         gitignore_path = path.join(repo_root, ".gitignore")
         ws_name = path.basename(ws_path)
         ignore_rule = f"/{ws_name}/*"
+        # Every line the block needs to be considered complete: the blanket
+        # ignore rule plus one negation per PRESERVED_WS_ENTRIES entry. A
+        # parent repository that already has the blanket rule (e.g. from an
+        # older/partial version of this block, or added by hand) but is
+        # missing one or more negations would otherwise never get them
+        # added, silently keeping those preserved files out of `git
+        # status` forever - so check each required line individually
+        # instead of returning as soon as just the ignore rule is found.
+        required_lines = [ignore_rule] + [f"!/{ws_name}/{entry}"
+                                          for entry in sorted(self.PRESERVED_WS_ENTRIES)]
+        existing_lines = set()
         if path.isfile(gitignore_path):
             with open(gitignore_path, "r", encoding="utf-8") as f:
                 # Compare whole, active (non-comment) lines instead of a
@@ -465,14 +487,12 @@ class Workspace:
                 # installed" and leave the generated workspace untracked.
                 existing_lines = {line.strip() for line in f
                                   if line.strip() and not line.strip().startswith("#")}
-            if ignore_rule in existing_lines:
-                return
+        missing_lines = [line for line in required_lines if line not in existing_lines]
+        if not missing_lines:
+            return
         lines = [f"# ignore everything in the generated {ws_name} workspace",
-                f"# (added automatically by checkout.py, see README Note #2)",
-                ignore_rule
-                ]
-        for entry in sorted(self.PRESERVED_WS_ENTRIES):
-            lines.append(f"!/{ws_name}/{entry}")
+                f"# (added automatically by checkout.py, see README Note #2)"
+                ] + missing_lines
         needs_leading_blank = path.isfile(gitignore_path) and path.getsize(gitignore_path) > 0
         with open(gitignore_path, "a", encoding="utf-8") as f:
             if needs_leading_blank:
