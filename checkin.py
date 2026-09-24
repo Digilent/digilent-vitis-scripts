@@ -311,6 +311,10 @@ class SrcFilesWS:
     SUCCESS = 0
     APP_SRCCODE = "src"
     EXCLUDE_BSYSF_IDX = 1
+    # Manifest written by checkout.py (_buildPlatform) into a platform's
+    # workspace component dir, recording the original "src" folder name the
+    # xsa was checked out from (see checkout.py's ".digilent_source_dir").
+    SRC_DIR_MANIFEST = ".digilent_source_dir"
 
     def __init__(self):
         """
@@ -326,8 +330,16 @@ class SrcFilesWS:
         self._lsBldFl = []
         # Path(s) of xsa files;
         self._lsArchFl = []
-        # Dir(s) for platforms;
+        # Dir(s) for platforms (workspace component/xsa-stem names, used to
+        # correlate an app's recorded ".xpfm" reference back to its xsa);
         self._lsArchPltDir = []
+        # Dir(s) to check the platform's xsa file INTO under src (the
+        # original source folder name, when checkout recorded one via
+        # ".digilent_source_dir"; falls back to the workspace component
+        # name otherwise). May differ from lsArchPltDir when the workspace
+        # component name and the original checked-in folder name diverge
+        # (e.g. platform disambiguation renamed the xsa stem).
+        self._lsArchSrcDir = []
         # Buffer to store Path(s) of src files;
         self._lsTempSrcFl = []
 
@@ -411,8 +423,14 @@ class SrcFilesWS:
             # more platforms than applications (e.g. an intentionally
             # unbound platform kept via --skip-unbound-platforms).
             for pltIdx in range(0, dimLsArchFl):
-                if path.isdir(self.lsArchPltDir[pltIdx]) is not True:
-                    mkdir(self.lsArchPltDir[pltIdx])
+                # Destination dir preserves the original checked-in "src"
+                # folder name across renames of the workspace platform
+                # component (see findPlatforms/lsArchSrcDir); using the
+                # workspace name directly here would create a brand-new
+                # dir and orphan the original one whenever they diverge.
+                destPltDir = self.lsArchSrcDir[pltIdx]
+                if path.isdir(destPltDir) is not True:
+                    mkdir(destPltDir)
                 else:
                     # Remove any previously checked-in XSA(s) for this
                     # platform dir before copying the current one: if the
@@ -421,17 +439,17 @@ class SrcFilesWS:
                     # and checkout discovers every ".xsa" it finds, turning
                     # the stale leftover into a bogus extra platform.
                     newXsaName = path.basename(self.lsArchFl[pltIdx])
-                    for existing in listdir(self.lsArchPltDir[pltIdx]):
+                    for existing in listdir(destPltDir):
                         if (existing.lower().endswith(".xsa")
                                 and existing != newXsaName):
-                            stalePath = path.join(self.lsArchPltDir[pltIdx], existing)
+                            stalePath = path.join(destPltDir, existing)
                             remove(stalePath)
                             LOG(f"Removed stale checked-in XSA: {stalePath}")
                 # Impose read and write access for current files.
                 chmod(self.lsArchFl[pltIdx], S_IRUSR | S_IWUSR)
                 # Check for write protected file in self.lsArchFl.
                 if access(self.lsArchFl[pltIdx], R_OK | W_OK):
-                    copy(self.lsArchFl[pltIdx], self.lsArchPltDir[pltIdx])
+                    copy(self.lsArchFl[pltIdx], destPltDir)
                 else:
                     LOG(f"File {self.lsArchFl[pltIdx]} is not writable and readable")
             # Handoff (xsa) and build script files have been copied, src files too.
@@ -606,6 +624,16 @@ class SrcFilesWS:
         """ This setter so far is used only to reset self._lsArchPltDir """
         self._lsArchPltDir = val
 
+    @property
+    def lsArchSrcDir(self) -> list:
+        """ Get reference for self._lsArchSrcDir """
+        return self._lsArchSrcDir
+
+    @lsArchSrcDir.setter
+    def lsArchSrcDir(self, val):
+        """ This setter so far is used only to reset self._lsArchSrcDir """
+        self._lsArchSrcDir = val
+
 class Workspace:
     """
     @Description
@@ -745,14 +773,31 @@ class Workspace:
             for archIdx, archPltDir in enumerate(self.sfWs.lsArchPltDir):
                 if archPltDir == pltName:
                     actualXsaName = path.basename(self.sfWs.lsArchFl[archIdx])
-                    relPathPlt = SrcFilesWS.APP_SRCCODE + sep + pltName + sep + actualXsaName
+                    # Use the actual checked-in destination directory (see
+                    # findPlatforms/lsArchSrcDir), not the workspace
+                    # platform name: when they diverge (e.g. checkout
+                    # disambiguated the platform's own name from its
+                    # original "src" folder), pltName points nowhere under
+                    # the checked-in src tree the next checkout will see.
+                    destDir = self.sfWs.lsArchSrcDir[archIdx]
+                    relPathPlt = SrcFilesWS.APP_SRCCODE + sep + destDir + sep + actualXsaName
                     break
             if relPathPlt is None:
                 LOG(f"Application \"{appName}\" references platform \"{pltName}\" "
                    f"which was not found among the discovered platforms; its "
                    f"comp-settings.json xsa correlation entry may be wrong!")
                 relPathPlt = SrcFilesWS.APP_SRCCODE + sep + pltName + sep + pltName + ".xsa"
-            self.cfgWs.utilCfgWs.dPltAppCorr[appName] = relPathPlt
+            # Preserve the exact processor/domain this app was bound to
+            # (e.g. "psu_cortexa53_0" vs "psu_cortexr5_0" on a
+            # multi-processor xsa) alongside the xsa correlation, so
+            # checkout.py rebuilds it against the same domain instead of
+            # whichever processor its own HW metadata extraction happens
+            # to expose first (see checkout.py's getAppTargetProc).
+            cpuInstance = dJsonData.get("cpuInstance", "")
+            self.cfgWs.utilCfgWs.dPltAppCorr[appName] = {
+                "xsa": relPathPlt,
+                "cpu_instance": cpuInstance
+                }
             # Search for build file.
             bFile = list(Path(pItem).rglob(
                             SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX]))
@@ -822,10 +867,18 @@ class Workspace:
         sw structure had been verified long before calling findPlatforms.
         Iterate over all content of <ws> to find *.xsa file(s). Only the first
         file found is stored in self.sfWs.lsArchFl, <platform-dirname> into
-        self.sfWs.lsArchPltDir respectively.
+        self.sfWs.lsArchPltDir respectively. self.sfWs.lsArchSrcDir gets the
+        directory the xsa should be checked in UNDER src: the original
+        source folder name recorded by checkout.py in SRC_DIR_MANIFEST when
+        available (so a rename/disambiguation of the workspace platform
+        name, e.g. two xsa's sharing a stem, does not make check-in create
+        a brand-new "src" directory and orphan the original one, which
+        would leave a stale checked-in xsa for the next checkout to
+        rediscover as a bogus duplicate platform), otherwise the workspace
+        platform dirname itself (first-time check-in of a new platform).
         """
         IDX_FRENC = 0
-        self.sfWs.lsArchFl, self.sfWs.lsArchPltDir = [], []
+        self.sfWs.lsArchFl, self.sfWs.lsArchPltDir, self.sfWs.lsArchSrcDir = [], [], []
         chdir(self.sfWs.appDir)
         pCwd = getcwd()
         for item in listdir(pCwd):
@@ -840,6 +893,15 @@ class Workspace:
                 self.sfWs.lsArchFl.append(str(archFile[IDX_FRENC]))
                 # Preserve platforms dirs.
                 self.sfWs.lsArchPltDir.append(item)
+                # Original source folder, if checkout.py recorded one.
+                srcDirManifest = path.join(pItem, SrcFilesWS.SRC_DIR_MANIFEST)
+                srcDir = item
+                if path.isfile(srcDirManifest):
+                    with open(srcDirManifest, "r") as f:
+                        manifestDir = f.read().strip()
+                    if manifestDir != "":
+                        srcDir = manifestDir
+                self.sfWs.lsArchSrcDir.append(srcDir)
         # Get back to 'sw submodule'.
         chdir(self.sfWs.pSubSw)
         LOG("Number of platforms found: " + str(len(self.sfWs.lsArchPltDir)))
