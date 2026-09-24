@@ -162,3 +162,73 @@ directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
 `stopDanglingVitisProcesses`, and `updatePlatformXsa`.
 
 ----
+
+## Command Reference (copy/paste, replace placeholders as needed)
+
+`checkout.py` flags (combinable): `--platform <platform-name>` (repeatable),
+`--app <app-name>` (repeatable), `--skip-unbound-platforms`, `--incremental`
+(only meaningful together with `--platform`/`--app`). `checkin.py` takes
+no flags. Replace `<version>` with the installed Vitis version (e.g.
+`2025.2`) and `<install-path>` with a specific install root to search first.
+
+Windows (`_vitis.bat`), run from the repository root:
+
+```bat
+:: full wipe + rebuild of every platform/app
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py
+
+:: rebuild only this platform (+ any app bound to it)
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --platform <platform-name>
+
+:: rebuild only this app (+ its resolved platform)
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --app <app-name>
+
+:: rebuild only this explicit platform+app pair
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --platform <platform-name> --app <app-name>
+
+:: rebuild this app in place (re-sync + incremental cmake build, no delete/recreate)
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --app <app-name> --incremental
+
+:: full run, but skip platforms not referenced by any app's comp-settings.json
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --skip-unbound-platforms
+
+:: rebuild only this platform, still skipping other unbound platforms
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --platform <platform-name> --skip-unbound-platforms
+
+:: back up the current workspace's sources into src\
+.\scripts\_vitis.bat -v <version> -s .\scripts\checkin.py
+
+:: only stop leftover Vitis-install-scoped processes (no script run)
+.\scripts\_vitis.bat -v <version> --stop-dangling
+
+:: search a specific install root first, then run checkout.py
+.\scripts\_vitis.bat -v <version> -i <install-path> -s .\scripts\checkout.py
+```
+
+Windows (`_vitis.ps1`), run from the repository root:
+
+```powershell
+# full wipe + rebuild of every platform/app
+.\scripts\_vitis.ps1 -v <version> -s .\scripts\checkout.py
+
+# rebuild only this platform in place (incremental)
+.\scripts\_vitis.ps1 -v <version> -s .\scripts\checkout.py --platform <platform-name> --incremental
+
+# only stop leftover Vitis-install-scoped processes (no script run)
+.\scripts\_vitis.ps1 -v <version> -StopDangling
+```
+
+Linux (`_vitis.sh`), run from the repository root:
+
+```bash
+# full wipe + rebuild of every platform/app
+./scripts/_vitis.sh -v <version> -s scripts/checkout.py
+
+# rebuild only this app in place (incremental)
+./scripts/_vitis.sh -v <version> -s scripts/checkout.py --app <app-name> --incremental
+
+# only stop leftover Vitis-install-scoped processes (no script run)
+./scripts/_vitis.sh -v <version> --stop-dangling
+```
+
+----
