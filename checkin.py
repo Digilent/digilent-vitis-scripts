@@ -462,11 +462,18 @@ class SrcFilesWS:
         path.relpath against <app-dir-src> (lApps[appIdx] + APP_SRCCODE) is used to
         recover the *full* subdirectory chain that needs to be recreated under
         <app-dirname-src>, no matter how many levels deep a file is nested
-        (e.g. src/tac5x1x_tac5142/<any-further-nesting>/tac5x1x_tac5142.c),
-        not just the immediate parent dir. makedirs (instead of mkdir) is used
-        since more than one intermediate directory level may need to be created
-        at once. If directories have been already created, then calling
-        `makedirs` is avoided.
+        (e.g. src/utils/<any-further-nesting>/foo.c), not just the immediate
+        parent dir. The one exception is an extra module directory (e.g.
+        "tac5x1x_tac5142", a small shared driver module) - the workspace
+        nests it one level inside the component's own "src"
+        (<app-dir-src>/<module>/...), matching where checkout.py's
+        _importAppExtraModules put it, but it's checked in as a SIBLING of
+        <app-dirname-src> instead, at <app-dirname>/<module>/..., per the
+        checkout-side manifest (.digilent_extra_modules) recorded at the
+        component root. makedirs (instead of mkdir) is used since more than
+        one intermediate directory level may need to be created at once. If
+        directories have been already created, then calling `makedirs` is
+        avoided.
 
         @Parameters
         appIdx: integer for App(s) files.
@@ -477,6 +484,21 @@ class SrcFilesWS:
         # e.g. appIdx=0 is for App1.
         loc, locFMisc = locDuo
         appSrcRoot = path.join(lApps[appIdx], SrcFilesWS.APP_SRCCODE)
+        # Extra module directories (see checkout.py's _importAppExtraModules)
+        # are imported into the workspace nested one level inside the
+        # component's own "src" (<component>/src/<module>/...), but are
+        # checked in as a SIBLING of the app's own "src" folder, at
+        # src/<app-dirname>/<module>/... - not inside it. Read back the
+        # manifest checkout.py writes at the component root
+        # (.digilent_extra_modules, see _writeExtraModulesManifest) so
+        # those top-level directory names can be redirected to locFMisc
+        # (the app root) instead of being nested under loc like ordinary
+        # source files.
+        extraModuleNames = set()
+        manifestPath = path.join(lApps[appIdx], ".digilent_extra_modules")
+        if path.isfile(manifestPath):
+            with open(manifestPath, "r", encoding="utf-8") as f:
+                extraModuleNames = {line.strip() for line in f if line.strip()}
         # Reconcile <app-dirname-src> (loc) against what will actually be
         # (re)copied this run: a repeated check-in must also remove any
         # previously checked-in source file whose workspace counterpart was
@@ -486,7 +508,9 @@ class SrcFilesWS:
         for item in self._lsTempSrcFl[appIdx]:
             for subItem in item:
                 if subItem.startswith(appSrcRoot + sep):
-                    keepRelPaths.add(path.relpath(subItem, appSrcRoot))
+                    relPath = path.relpath(subItem, appSrcRoot)
+                    if relPath.split(sep, 1)[0] not in extraModuleNames:
+                        keepRelPaths.add(relPath)
         # collectCpyFiles already (re)copied this app's build file (e.g.
         # CMakeLists.txt) directly into loc, right before calling this
         # function - it lives outside _lsTempSrcFl, so without this it
@@ -507,14 +531,18 @@ class SrcFilesWS:
                 # Take all files from each sublist and copy them, preserving
                 # any nr of nested dirs found between <app-dir-src> and a file.
                 miscFileName = subItem[subItem.rfind(sep) + 1:]
+                destRoot = loc
                 if subItem.startswith(appSrcRoot + sep):
-                    relDirLoc = path.dirname(path.relpath(subItem, appSrcRoot))
+                    relPath = path.relpath(subItem, appSrcRoot)
+                    if relPath.split(sep, 1)[0] in extraModuleNames:
+                        destRoot = locFMisc
+                    relDirLoc = path.dirname(relPath)
                 else:
                     # File is not under <app-dir>/src (e.g. .gitignore sitting
                     # directly in <app-dirname>), handled by the misc case below.
                     relDirLoc = ""
                 if relDirLoc not in ("", "."):
-                    nLoc = path.join(loc, relDirLoc)
+                    nLoc = path.join(destRoot, relDirLoc)
                     if path.isdir(nLoc) is not True:
                         makedirs(nLoc)
                     # Impose read and write access for current files.
