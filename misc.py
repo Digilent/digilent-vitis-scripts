@@ -18,7 +18,7 @@ from ctypes import cdll
 from logging import (Logger, INFO, StreamHandler,
                      Formatter)
 from sys import (stdout, argv)
-from argparse import (ArgumentParser, FileType)
+from argparse import ArgumentParser
 
 # File constants
 FNEXIST = 1
@@ -44,26 +44,20 @@ def MapCmdLineOpts(opt=OPT_CHECKIN, kwCLO={}):
     Form-factor:
     --port=<port-number>, this can be left blank to get automatically the port
     --ip=<ip-address>, this can be left blank to use localhost
-    --fastsave=<speed-level>, levels: 1, 2, 3, these influence nr. of threads,
-                               if left blank no other thread is created
-    --outputfile=<save-log-messages-into-a-file>, path to a file or name of file
     
     The above options order is not important, so they can be passed
     in any possible order.
     """
-    lsEntries = ["--port", "--ip", "--fastsave", "--outputfile"]
+    lsEntries = ["--port", "--ip"]
     for itm in lsEntries:
         kwCLO[itm] = ""
 
     if len(argv) > 1:
         parser = ArgumentParser(
-                    description="Checkin options" if opt == OPT_CHECKOUT else
-                                "Checkout options")
+                    description="Checkout options" if opt == OPT_CHECKOUT else
+                                "Checkin options")
         parser.add_argument(f"{lsEntries[0]}", type=int, help="Server's port number")
         parser.add_argument(f"{lsEntries[1]}", type=str, help="Server's ip or localhost")
-        parser.add_argument(f"{lsEntries[2]}", type=int, help="Influences no. of threads")
-        parser.add_argument(f"{lsEntries[3]}", type=FileType("w"),
-                            help="Redirect output of used utility")
         args = parser.parse_args()
         for idx in range(0, len(lsEntries)):
             # Trim the first two `--` dashes.
@@ -376,6 +370,28 @@ _VITIS_GENERIC_PROC_NAMES_WIN = {"eclipse.exe", "java.exe"}
 _VITIS_GENERIC_PROC_NAMES_LNX = {"eclipse", "java"}
 
 
+def _isUnderInstallRoot(candidate : str, root : str) -> bool:
+    """
+    @Description
+    Boundary-aware "is candidate the root itself, or strictly under it"
+    check, comparing normalized/absolute paths so relative segments
+    ("..", ".") and case (on Windows) don't cause false results. Unlike a
+    plain str.startswith(root) test, this requires a path-separator (or
+    exact equality) right after the root, so a sibling install like
+    "Vitis-old" is never mistaken for a descendant of "Vitis".
+
+    @Parameters
+    candidate: path to test (e.g. a process's executable path).
+    root: the install root to test against.
+
+    @Returns
+    True if candidate == root or candidate is nested under root.
+    """
+    normCandidate = os.path.normcase(os.path.normpath(os.path.abspath(candidate)))
+    normRoot = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+    return normCandidate == normRoot or normCandidate.startswith(normRoot + os.sep)
+
+
 def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> list:
     """
     @Description
@@ -416,7 +432,7 @@ def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> li
             f"Get-CimInstance Win32_Process | Where-Object {{ @({nameList}) -contains $_.Name }} | "
             "ForEach-Object { "
             "$created = ''; "
-            "if ($_.CreationDate) { $created = [Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate).ToString('o') }; "
+            "if ($_.CreationDate) { $created = $_.CreationDate.ToString('o') }; "
             "\"$($_.ProcessId)|$($_.Name)|$($_.ExecutablePath)|$created\" }"
         )
         out = subprocess.run(
@@ -435,7 +451,7 @@ def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> li
                 # (including the otherwise-unambiguous "vitis"/
                 # "vitis-server") to it, so a different Vitis version's
                 # processes are never touched.
-                if not exePath or not os.path.normcase(exePath).startswith(os.path.normcase(os.path.abspath(vitisRoot))):
+                if not exePath or not _isUnderInstallRoot(exePath, vitisRoot):
                     continue
             elif name in genericNames:
                 # No install root given: generic names are inherently
@@ -469,7 +485,7 @@ def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> li
                 # "vitis-server") to it, so a different Vitis version's
                 # processes are never touched.
                 exePath = os.path.realpath(f"/proc/{pid}/exe")
-                if not exePath.startswith(os.path.abspath(vitisRoot)):
+                if not _isUnderInstallRoot(exePath, vitisRoot):
                     continue
             elif name in genericNames:
                 # No install root given: generic names are inherently
