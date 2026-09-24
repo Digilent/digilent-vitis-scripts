@@ -9,11 +9,13 @@
 
 script_dir=$(dirname ${BASH_SOURCE[0]})
 
-# Remove directories/subdirectories
-find $script_dir -mindepth 1 -type d -exec rm -rf {} +
+# Remove directories/subdirectories, but never Git metadata (.git can be a
+# directory in a standalone clone or a file in a submodule; either way, do
+# not let it be swept up as a generic "other file" below).
+find $script_dir -mindepth 1 -name '.git' -prune -o -type d -exec rm -rf {} +
 
 # Remove any other files than:
-find $script_dir -type f ! -name 'cleanup.sh'  \
+find $script_dir -name '.git' -prune -o -type f ! -name 'cleanup.sh'  \
 			 ! -name 'cleanup.cmd' \
 			 ! -name 'checkin.py'  \
 			 ! -name 'checkout.py' \
