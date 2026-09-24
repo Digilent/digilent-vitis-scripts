@@ -87,6 +87,17 @@ if defined INSTALL_PATH (
     if exist "%INSTALL_PATH%\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PATH%"
     if not defined VITIS_ROOT if exist "%INSTALL_PATH%\%VERSION%\Vitis\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PATH%\%VERSION%\Vitis"
     if not defined VITIS_ROOT if exist "%INSTALL_PATH%\Vitis\%VERSION%\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PATH%\Vitis\%VERSION%"
+    rem INSTALL_PATH may also be one level ABOVE the vendor dir (e.g.
+    rem "C:\AMDDesignTools\2025.2" itself, one level short of "...\Vitis"),
+    rem matching the shell/PowerShell/Python discovery implementations,
+    rem which all also try the parent of the configured path. Without this,
+    rem such a path misses the valid install below it and falls through to
+    rem the (much less targeted) drive-wide scan below.
+    if not defined VITIS_ROOT (
+        for %%P in ("%INSTALL_PATH%\..") do set "INSTALL_PARENT=%%~fP"
+    )
+    if not defined VITIS_ROOT if defined INSTALL_PARENT if exist "%INSTALL_PARENT%\%VERSION%\Vitis\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PARENT%\%VERSION%\Vitis"
+    if not defined VITIS_ROOT if defined INSTALL_PARENT if exist "%INSTALL_PARENT%\Vitis\%VERSION%\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PARENT%\Vitis\%VERSION%"
 )
 for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
     for %%N in (AMDDesignTools Xilinx) do (
