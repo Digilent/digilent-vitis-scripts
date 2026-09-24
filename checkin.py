@@ -23,7 +23,7 @@ from pathlib import Path
 from shutil import copy
 from json import (JSONEncoder, JSONDecoder)
 from re import (compile, escape, RegexFlag)
-from sys import version_info, exit as sys_exit
+from sys import exit as sys_exit
 from misc import (LOG, MapCmdLineOpts)
 
 class UtilityWS:
@@ -301,16 +301,25 @@ class SrcFilesWS:
     lsConfCpy = ["CMakeLists.txt", "vitis-comp.json", "*.cmake",
                  "*.ld", "Makefile", ".gitignore"
                  ]
-    lsSrcCpy = ["*.h", "*.hpp", "*.c",
-                "*.cpp", "*.cc", "*.S",
-                "*.scat", "*.mk", "*.C",
-                "*.cxx", "*.c++", "*.s"
-                ]
+    # Entries that can appear directly under an app's workspace <app>/src
+    # dir that are Vitis-generated metadata, never actual application
+    # source (mirrors checkout.py's _pruneStaleFiles rationale/set for the
+    # same directory level - CMakeLists.txt is excluded separately below,
+    # since it's already tracked as this app's own build file). Files not
+    # listed here are gathered unconditionally (see gatherAppSrcCd): a
+    # fixed extension allowlist previously stood in for this set, silently
+    # dropping any valid file whose extension it did not anticipate (e.g.
+    # ".hh"/".hxx" headers, ".inc" fragments, or binary assets), and - since
+    # that same list drove cpySrcFiles' stale-file pruning - deleting any
+    # such file's already checked-in copy on a repeated check-in.
+    VITIS_GENERATED_SRC_ENTRIES = frozenset({
+        "vitis-comp.json", "UserConfig.cmake", "app.yaml",
+        ".clangd", "compile_commands.json", ".compile_commands"
+        })
     HOFF_HDL = "*.xsa"
     FAILURE = -1
     SUCCESS = 0
     APP_SRCCODE = "src"
-    EXCLUDE_BSYSF_IDX = 1
     # Manifest written by checkout.py (_buildPlatform) into a platform's
     # workspace component dir, recording the original "src" folder name the
     # xsa was checked out from (see checkout.py's ".digilent_source_dir").
@@ -523,11 +532,22 @@ class SrcFilesWS:
         # deleted/renamed since the last check-in, otherwise a later
         # checkout keeps restoring (and compiling) the stale copy forever.
         keepRelPaths = set()
+        # Same reconciliation, but per extra module (see the docstring
+        # above): each module's checked-in destination is
+        # <app-dirname>/<module>, a SEPARATE directory from loc, so it
+        # needs its own keep-set/prune pass below - otherwise a file
+        # deleted/renamed inside a workspace extra module was never
+        # pruned here, and the next checkout kept restoring/compiling the
+        # stale sibling-module copy forever.
+        moduleKeepRelPaths = {}
         for item in self._lsTempSrcFl[appIdx]:
             for subItem in item:
                 if subItem.startswith(appSrcRoot + sep):
                     relPath = path.relpath(subItem, appSrcRoot)
-                    if relPath.split(sep, 1)[0] not in extraModuleNames:
+                    moduleName, moduleSep, moduleRelPath = relPath.partition(sep)
+                    if moduleName in extraModuleNames and moduleSep != "":
+                        moduleKeepRelPaths.setdefault(moduleName, set()).add(moduleRelPath)
+                    else:
                         keepRelPaths.add(relPath)
         # collectCpyFiles already (re)copied this app's build file (e.g.
         # CMakeLists.txt) directly into loc, right before calling this
@@ -544,6 +564,19 @@ class SrcFilesWS:
                         remove(destAbs)
                         LOG(f"Removed stale checked-in source no longer "
                            f"present in the workspace: {destAbs}")
+        for moduleName in extraModuleNames:
+            moduleDestDir = path.join(locFMisc, moduleName)
+            if not path.isdir(moduleDestDir):
+                continue
+            keepModulePaths = moduleKeepRelPaths.get(moduleName, set())
+            for dirpath, _, filenames in walk(moduleDestDir):
+                for filename in filenames:
+                    destAbs = path.join(dirpath, filename)
+                    destRel = path.relpath(destAbs, moduleDestDir)
+                    if destRel not in keepModulePaths:
+                        remove(destAbs)
+                        LOG(f"Removed stale checked-in extra module source "
+                           f"no longer present in the workspace: {destAbs}")
         for item in self._lsTempSrcFl[appIdx]:
             for subItem in item:
                 # Take all files from each sublist and copy them, preserving
@@ -675,30 +708,45 @@ class Workspace:
         """
         @Description
         Store in a list which is associated with an app, all the files
-        that need to be copied to <sw-src>. srcFiles holds all the encountered
-        header files for example.
+        that need to be copied to <sw-src>. Every regular file found under
+        <app-dir>/src is gathered recursively, except this app's own build
+        file (already tracked separately, see collectCpyFiles/lsBldFl) and
+        a defined set of Vitis-generated metadata entries that can appear
+        directly at this level alongside real source (see
+        VITIS_GENERATED_SRC_ENTRIES).
+
+        Walking the whole tree instead of matching only a fixed extension
+        allowlist (the previous per-extension rglob loop, SrcFilesWS.
+        lsSrcCpy) means a file whose extension that allowlist never
+        anticipated (e.g. ".hh"/".hxx" headers, ".inc" fragments, binary
+        assets) is no longer silently skipped - which, since this same
+        file set also drives cpySrcFiles' stale-file pruning, previously
+        deleted such a file's already checked-in copy on a repeated
+        check-in.
 
         @Parameters
         pSrcFl: Path to src dir from <app-dir>.
         """
         pSrcFlLoc = path.join(pSrcFl, SrcFilesWS.APP_SRCCODE)
-        pCwd = getcwd()
-        chdir(pSrcFlLoc)
-        # Can store not just SrcFilesWS.lsSrcCpy '*.<some-extension>'.
-        for item in SrcFilesWS.lsSrcCpy:
-            # rglob only accepts case_sensitive= from py v3.12; Vitis 2024.1
-            # ships Python 3.8.3, so gate the keyword by version instead of
-            # always passing it (which raises TypeError on older pythons).
-            if version_info >= (3, 12):
-                srcFiles = list(Path(pSrcFlLoc).rglob(item, case_sensitive=True))
-            else:
-                srcFiles = list(Path(pSrcFlLoc).rglob(item))
-            if len(srcFiles) != UtilityWS.EMPTY_BUFFER:
-                # [[]] - type
-                self.sfWs.lsTempSrcFl[self.idxApp].append([str(itm) for itm in srcFiles])
+        buildFilePath = path.normpath(self.sfWs.lsBldFl[self.idxApp])
+        srcFiles = []
+        for dirpath, dirnames, filenames in walk(pSrcFlLoc):
+            isTopLevel = dirpath == pSrcFlLoc
+            if isTopLevel:
+                dirnames[:] = [d for d in dirnames
+                              if d not in SrcFilesWS.VITIS_GENERATED_SRC_ENTRIES]
+            for filename in filenames:
+                if isTopLevel and filename in SrcFilesWS.VITIS_GENERATED_SRC_ENTRIES:
+                    continue
+                fullPath = path.join(dirpath, filename)
+                if path.normpath(fullPath) == buildFilePath:
+                    continue
+                srcFiles.append(fullPath)
+        if len(srcFiles) != UtilityWS.EMPTY_BUFFER:
+            # [[]] - type
+            self.sfWs.lsTempSrcFl[self.idxApp].append(srcFiles)
         # [[App1],[App2],[App3], ...], where App1,App2,App3 are other lists with
         # paths of source files that need to be copied.
-        chdir(pCwd)
 
     def gatherAppOtherConf(self,
                            pSrcFl : str,
@@ -706,10 +754,13 @@ class Workspace:
                            ):
         """
         @Description
-        Files from SrcFilesWS.lsConfCpy are added to self.sfWs.lsTempSrcFl if
-        they are found. Some are excluded with "slices" <idx-prefix> : <idx-suffix>.
-        In some cases prefix/suffix are put directly as values, SrcFilesWS.lsConfCpy
-        should be edited accordingly.
+        Adds pSrcFl's own top-level ".gitignore" (SrcFilesWS.lsConfCpy[-1])
+        to self.sfWs.lsTempSrcFl when repflOpt is set: it lives directly
+        under <app-dirname>, not under <app-dirname>/src, so gatherAppSrcCd
+        never encounters it. Everything under <app-dirname>/src itself
+        (e.g. "*.cmake"/"*.ld"/Makefile files previously matched here by
+        name) is now gathered unconditionally by gatherAppSrcCd instead of
+        matched against a fixed allowlist in this function.
 
         @Parameters
         pSrcFl: Path to src dir from <app-dir>.
@@ -722,16 +773,6 @@ class Workspace:
                 pGIgn = path.join(pSrcFl, SrcFilesWS.lsConfCpy[-1])
                 if path.exists(pGIgn) is True:
                     self.sfWs.lsTempSrcFl[self.idxApp].append([pGIgn])
-            pSrcFlLoc = path.join(pSrcFl, SrcFilesWS.APP_SRCCODE)
-            pCwd = getcwd()
-            chdir(pSrcFlLoc)
-            # Avoid build-sys file from first pos.
-            for item in SrcFilesWS.lsConfCpy[SrcFilesWS.EXCLUDE_BSYSF_IDX + 1:-1]:
-                srcFiles = list(Path(pSrcFlLoc).rglob(item))
-                if len(srcFiles) != UtilityWS.EMPTY_BUFFER:
-                    # [[]] - type
-                    self.sfWs.lsTempSrcFl[self.idxApp].append([str(itm) for itm in srcFiles])
-            chdir(pCwd)
 
     def processGatherFiles(self,
                            cmpFile : list,
@@ -744,6 +785,15 @@ class Workspace:
         Filter Vitis applications files, gather source files + other configs,
         findApplications uses it, but functions should have a limited no. or lines.
         Check description from it.
+
+        Only "standalone" (bare-metal) applications are checked in: checkout.py
+        only ever reconstructs "standalone" domains (see _buildPlatform), and
+        an actual Linux application needs a "linux" domain/template plus a
+        sysroot, none of which these scripts set up. Silently checking such
+        an app in anyway would let a later checkout rebuild it against a
+        standalone BSP instead, replacing its real target without any
+        indication something went wrong - so it is rejected here instead
+        (see dJsonData["os"], vitis-comp.json's own recorded OS).
         """
         NOT_PATH = -1
         if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
@@ -753,6 +803,13 @@ class Workspace:
             ):
             # Associate application with its platform.
             appName = pItem[pItem.rfind(sep) + 1:]
+            appOs = dJsonData.get("os", "standalone")
+            if appOs != "standalone":
+                LOG(f"Skipping application \"{appName}\": checking in a "
+                   f"\"{appOs}\" application is not supported (checkout.py "
+                   f"only reconstructs \"standalone\" bare-metal domains); "
+                   f"it must be checked in/managed separately.")
+                return
             lHwPlt = dJsonData["platform"]
             # This idx has two uses, one for path like values in "platform"
             # and the second one if there is directly the name of platform.
