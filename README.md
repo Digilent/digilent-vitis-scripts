@@ -2,7 +2,7 @@
 # digilent-vitis-scripts
 
 This is a repo for the new Vitis Unified IDE; it contains solutions for check in/out workflow.
-The checkin/out scripts will handle all the neccessary tasks to ensure a smooth workflow
+The checkin/out scripts will handle all the necessary tasks to ensure a smooth workflow
 for development of `projects`.
 
 **Note #1:**
@@ -61,7 +61,7 @@ for development of `projects`.
 
    The above functionality can be reproduced from Vitis Unified IDE launching the terminal
    from Terminal -> New Terminal which uses the default command line executable from the OS.
-   If this is the choosen method, then it will be necessary to give absolute path to the
+   If this is the chosen method, then it will be necessary to give absolute path to the
    `checkout.py` file, not relative:
 
    `vitis -s <path-to-scripts-repo>checkout.py`
@@ -106,7 +106,7 @@ for development of `projects`.
 
    The above functionality can be reproduced from Vitis Unified IDE by launching the terminal from
    Terminal -> New Terminal which uses the default command line executable from the OS. If
-   this is the choosen method, then it will be necessary to give absolute path to the `checkin.py`
+   this is the chosen method, then it will be necessary to give absolute path to the `checkin.py`
    file, not relative:
 
    `vitis -s <path-to-scripts-repo>checkin.py`
@@ -149,11 +149,11 @@ unrelated `java`/`eclipse` process elsewhere on the machine is left alone).
 
 Examples (run from any directory):
 
-`.\scripts\_vitis.ps1 -v 2025.2 -s scripts\checkout.py`
+`.\scripts\_vitis.ps1 -v 2025.2 -s checkout.py`
 
-`scripts\_vitis.bat -v 2025.2 -s scripts\checkin.py`
+`scripts\_vitis.bat -v 2025.2 -s checkin.py`
 
-`./scripts/_vitis.sh -v 2025.2 -s scripts/checkout.py`
+`./scripts/_vitis.sh -v 2025.2 -s checkout.py`
 
 The same Vitis-locating/launching logic, plus process management and
 platform XSA update/upgrade helpers, is available for use from Python
@@ -167,52 +167,55 @@ directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
 
 `checkout.py` flags (combinable): `--platform <platform-name>` (repeatable),
 `--app <app-name>` (repeatable), `--skip-unbound-platforms`, `--incremental`
-(only meaningful together with `--platform`/`--app`). `checkin.py` takes
-no flags. Replace `<version>` with the installed Vitis version (e.g.
-`2025.2`) and `<install-path>` with a specific install root to search first.
+(only meaningful together with `--platform`/`--app`), `--allow-process-cleanup`.
+`checkin.py` takes no flags. Replace `<version>` with the installed Vitis
+version (e.g. `2025.2`) and `<install-path>` with a specific install root to
+search first. `-Script`/`-s` is always resolved relative to the launcher's
+own directory, so it takes a bare `checkout.py`/`checkin.py`, never prefixed
+with `scripts\`/`scripts/` again.
 
 Windows (`_vitis.bat`), run from the repository root:
 
 ```bat
 :: full wipe + rebuild of every platform/app
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py
+.\scripts\_vitis.bat -v <version> -s checkout.py
 
 :: rebuild only this platform (+ any app bound to it)
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --platform <platform-name>
+.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name>
 
 :: rebuild only this app (+ its resolved platform)
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --app <app-name>
+.\scripts\_vitis.bat -v <version> -s checkout.py --app <app-name>
 
 :: rebuild only this explicit platform+app pair
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --platform <platform-name> --app <app-name>
+.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --app <app-name>
 
 :: rebuild this app in place (re-sync + incremental cmake build, no delete/recreate)
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --app <app-name> --incremental
+.\scripts\_vitis.bat -v <version> -s checkout.py --app <app-name> --incremental
 
 :: full run, but skip platforms not referenced by any app's comp-settings.json
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --skip-unbound-platforms
+.\scripts\_vitis.bat -v <version> -s checkout.py --skip-unbound-platforms
 
 :: rebuild only this platform, still skipping other unbound platforms
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkout.py --platform <platform-name> --skip-unbound-platforms
+.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --skip-unbound-platforms
 
 :: back up the current workspace's sources into src\
-.\scripts\_vitis.bat -v <version> -s .\scripts\checkin.py
+.\scripts\_vitis.bat -v <version> -s checkin.py
 
 :: only stop leftover Vitis-install-scoped processes (no script run)
 .\scripts\_vitis.bat -v <version> --stop-dangling
 
 :: search a specific install root first, then run checkout.py
-.\scripts\_vitis.bat -v <version> -i <install-path> -s .\scripts\checkout.py
+.\scripts\_vitis.bat -v <version> -i <install-path> -s checkout.py
 ```
 
 Windows (`_vitis.ps1`), run from the repository root:
 
 ```powershell
 # full wipe + rebuild of every platform/app
-.\scripts\_vitis.ps1 -v <version> -s .\scripts\checkout.py
+.\scripts\_vitis.ps1 -v <version> -s checkout.py
 
 # rebuild only this platform in place (incremental)
-.\scripts\_vitis.ps1 -v <version> -s .\scripts\checkout.py --platform <platform-name> --incremental
+.\scripts\_vitis.ps1 -v <version> -s checkout.py --platform <platform-name> --incremental
 
 # only stop leftover Vitis-install-scoped processes (no script run)
 .\scripts\_vitis.ps1 -v <version> -StopDangling
@@ -222,10 +225,10 @@ Linux (`_vitis.sh`), run from the repository root:
 
 ```bash
 # full wipe + rebuild of every platform/app
-./scripts/_vitis.sh -v <version> -s scripts/checkout.py
+./scripts/_vitis.sh -v <version> -s checkout.py
 
 # rebuild only this app in place (incremental)
-./scripts/_vitis.sh -v <version> -s scripts/checkout.py --app <app-name> --incremental
+./scripts/_vitis.sh -v <version> -s checkout.py --app <app-name> --incremental
 
 # only stop leftover Vitis-install-scoped processes (no script run)
 ./scripts/_vitis.sh -v <version> --stop-dangling
