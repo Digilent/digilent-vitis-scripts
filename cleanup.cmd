@@ -22,6 +22,7 @@ attrib +R .\_vitis.bat
 attrib +R .\_vitis.sh
 attrib +R .\LICENSE
 attrib +R .\README.md
+attrib +R .\.gitignore
 
 rem delete all non read-only
 del /Q /A:-R .\*

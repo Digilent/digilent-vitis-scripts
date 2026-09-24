@@ -23,4 +23,5 @@ find $script_dir -type f ! -name 'cleanup.sh'  \
 			 ! -name '_vitis.sh'   \
 			 ! -name 'LICENSE'     \
 			 ! -name 'README.md'   \
+			 ! -name '.gitignore'  \
 			   -exec rm -rf {} +
