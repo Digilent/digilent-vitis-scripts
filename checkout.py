@@ -144,6 +144,16 @@ class Workspace:
         # as a scratch area so HSI's xsa-unzip side effects never land next
         # to the checked-in xsa files under `src`.
         self._wsPath = ""
+        # Set from checkOutSF's allow_process_cleanup arg. startedBefore
+        # already prevents this run's own just-started server from being
+        # killed, but a *pre-existing* vitis/vitis-server process from the
+        # same install could still be an unrelated, still-active session
+        # (another workspace, another user) rather than an actual leftover
+        # from a crashed run - the OS process list alone cannot tell these
+        # apart (the workspace is bound to a running server only via a
+        # later gRPC call, never visible on its command line). So
+        # force-killing pre-existing processes is opt-in, off by default.
+        self._allowProcessCleanup = False
 
     def setConfigDomain(self,
                         domain,
@@ -371,7 +381,11 @@ class Workspace:
         watching over it), so a previous run's Vitis server can be left
         dangling and hold a lock on ws_path's files; stopDanglingVitisProcesses
         is used to clear that out between attempts, instead of blindly
-        retrying the same wipe with no recovery action. Read-only files
+        retrying the same wipe with no recovery action - but only if
+        self._allowProcessCleanup was explicitly opted into (see
+        checkOutSF's allow_process_cleanup), since a pre-existing process
+        from the same install could just as easily be another still-active
+        Vitis session rather than an actual leftover. Read-only files
         HSI/SDT leaves behind (see _forceRemoveReadonly) are handled within
         the same wipe, not counted as a failed attempt. Also sets
         self._buildLogPath, where every subsequent component build's full
@@ -390,9 +404,14 @@ class Workspace:
             except Exception as e:
                 LOG(f"Attempt {attempt} to clear the old workspace failed: {e}")
                 if attempt < max_try:
-                    stopped = stopDanglingVitisProcesses(environ.get("XILINX_VITIS", ""), _PROCESS_START_TIME)
-                    if stopped:
-                        LOG(f"Stopped dangling Vitis process(es) holding the workspace: {stopped}")
+                    if self._allowProcessCleanup:
+                        stopped = stopDanglingVitisProcesses(environ.get("XILINX_VITIS", ""), _PROCESS_START_TIME)
+                        if stopped:
+                            LOG(f"Stopped dangling Vitis process(es) holding the workspace: {stopped}")
+                    else:
+                        LOG("Not stopping any Vitis process automatically (pass "
+                            "allow_process_cleanup/--allow-process-cleanup to enable this "
+                            "if you know no other Vitis session is active on this machine).")
                     time.sleep(1)
         else:
             raise Exception("Failed to delete old workspace even after stopping dangling Vitis "
@@ -414,7 +433,9 @@ class Workspace:
         ("_ide/.wsdata/.lock"), which makes set_workspace fail with
         "the workspace '...' is already in use" (FAILED_PRECONDITION) even
         though the process that created it is long gone. On failure, stops
-        any dangling Vitis process (stopDanglingVitisProcesses) and removes
+        any dangling Vitis process (stopDanglingVitisProcesses, only if
+        self._allowProcessCleanup was explicitly opted into - see
+        checkOutSF's allow_process_cleanup) and removes
         the stale lock file itself (killing the process alone does not
         always delete it, since it may not get a chance to clean up on a
         forceful stop), then retries a bounded number of times. Shared by
@@ -435,9 +456,14 @@ class Workspace:
             except Exception as e:
                 LOG(f"Attempt {attempt} to set workspace {ws_path} failed: {e}")
                 if attempt < max_try:
-                    stopped = stopDanglingVitisProcesses(environ.get("XILINX_VITIS", ""), _PROCESS_START_TIME)
-                    if stopped:
-                        LOG(f"Stopped dangling Vitis process(es) holding the workspace: {stopped}")
+                    if self._allowProcessCleanup:
+                        stopped = stopDanglingVitisProcesses(environ.get("XILINX_VITIS", ""), _PROCESS_START_TIME)
+                        if stopped:
+                            LOG(f"Stopped dangling Vitis process(es) holding the workspace: {stopped}")
+                    else:
+                        LOG("Not stopping any Vitis process automatically (pass "
+                            "allow_process_cleanup/--allow-process-cleanup to enable this "
+                            "if you know no other Vitis session is active on this machine).")
                     if path.isfile(lock_path):
                         try:
                             remove(lock_path)
@@ -492,7 +518,7 @@ class Workspace:
 
         for dirpath, dirnames, filenames in walk(src_root):
             for dirname in dirnames:
-                if search(r"src", dirname):
+                if dirname == "src":
                     application_name = path.basename(dirpath)
                     if application_name not in app_names:
                         app_names.append(application_name)
@@ -702,8 +728,12 @@ class Workspace:
             fixed_value = f"{lang_flags} {dep_flags} -specs={specs_file} -I{include_path}"
             if cacheVar(f"CMAKE_{lang}_FLAGS") == fixed_value:
                 continue
+            # fixed_value can contain Windows paths with backslashes; a
+            # plain string replacement would have re.sub interpret those
+            # as escape/group-reference sequences (e.g. "\C..."), so use a
+            # callable replacement to insert it as a literal value instead.
             cache_text, n = compile(rf"^(CMAKE_{lang}_FLAGS:\w+)=.*$", RegexFlag.MULTILINE).subn(
-                rf"\1={fixed_value}", cache_text, count=1
+                lambda m: f"{m.group(1)}={fixed_value}", cache_text, count=1
                 )
             if n:
                 changed = True
@@ -1304,16 +1334,16 @@ class Workspace:
             for filename in filenames:
                 if (filename in ("Xilinx.spec", "README.txt")):
                     LOG(f"Removing template file \"{filename}\" from {path.join(dirpath, filename)}")
-                    app.remove_files(files=[app.component_location + sep + "src" + sep + filename])
+                    app.remove_files(files=[path.join(dirpath, filename)])
 
         for dirpath, dirnames, filenames in walk(app.component_location + sep + "_ide"+ sep + "psinit"):
             for filename in filenames:
                 if (filename not in ("psu_init.tcl", "ps7_init.tcl")):
                     LOG(f"Removing template file \"{filename}\" from {path.join(dirpath, filename)}")
-                    app.remove_files(files=[app.component_location + sep + "_ide" + sep + "psinit" + sep + filename])
+                    app.remove_files(files=[path.join(dirpath, filename)])
 
     def checkOutSF(self, platforms=None, apps=None, skip_unbound_platforms=False,
-                   incremental=False) -> int:
+                   incremental=False, allow_process_cleanup=False) -> int:
         """
         @Description
         Recreate a Vitis workspace from the parent repository's `src`
@@ -1357,10 +1387,22 @@ class Workspace:
                   targets that don't exist yet are always created fresh
                   regardless of this flag, and any HW/domain-level platform
                   change still needs a full (non-incremental) rebuild.
+        allow_process_cleanup: if True, _prepareWorkspace/_setWorkspaceWithRetry
+                  are allowed to force-stop pre-existing vitis/vitis-server
+                  processes from the same install when a workspace wipe/select
+                  fails (see stopDanglingVitisProcesses). Off by default: the
+                  OS process list cannot tell an actual leftover from a
+                  crashed run apart from an unrelated, still-active Vitis
+                  session (the workspace is only bound to a running server
+                  through a later gRPC call, never visible on its command
+                  line), so this is opt-in and should only be enabled on a
+                  machine/CI runner where no other Vitis session runs
+                  concurrently.
         """
         platforms = set(platforms or [])
         apps = set(apps or [])
         selective = bool(platforms or apps)
+        self._allowProcessCleanup = allow_process_cleanup
 
         script_path = path.dirname(path.abspath(__file__))
         repo_root = script_path[:script_path.rfind(sep)]
@@ -1394,72 +1436,78 @@ class Workspace:
         # "-specs=nosys.specs" twice and break gcc's own spec merging
         # ("attempt to rename spec ... to already defined spec"). CXXFLAGS
         # is seeded independently of CFLAGS by CMake's C++ compiler test.
-        environ.setdefault("CFLAGS", "-specs=nosys.specs")
-        environ.setdefault("CXXFLAGS", "-specs=nosys.specs")
+        environ["CFLAGS"] = "-specs=nosys.specs"
+        environ["CXXFLAGS"] = "-specs=nosys.specs"
 
         dispose()
 
         LOG("Checking out Vitis project into the workspace...")
         client = create_client()
-
-        if selective:
-            self._openExistingWorkspace(client, ws_path)
-        else:
-            self._prepareWorkspace(client, ws_path)
-
-        app_names, hw_platforms = self._discoverAppsAndPlatforms(repo_root + f"{sep}src")
-        self._extractPlatformMetadata(hw_platforms)
-
-        if selective:
-            platforms, apps = self._resolveSelectiveTargets(
-                platforms, apps, app_names, hw_platforms, repo_root
-                )
-            existing = {c["name"] for c in client.list_components()}
-        else:
-            existing = set()
-
-        bound_platforms = None
-        if skip_unbound_platforms:
-            bound_platforms = self._getBoundPlatformNames(app_names, hw_platforms, repo_root)
-
-        for xsa_path, plt in hw_platforms.items():
-            if selective and plt["name"] not in platforms:
-                # Not being rebuilt, but _buildApplication still needs
-                # "domain_name"/"xpfm" to bind any requested app to it.
-                self._setPlatformDomainInfo(client, plt)
-                continue
-            explicitly_requested = selective and plt["name"] in platforms
-            if (bound_platforms is not None and not explicitly_requested
-                    and plt["name"] not in bound_platforms):
-                LOG(f"Skipping platform \"{plt['name']}\": not referenced by any "
-                   f"application's comp-settings.json (--skip-unbound-platforms)")
-                continue
-            # _buildPlatform may also create a separate "<name>_FSBL" app
-            # component (see _buildZynqMPFsbl, zynquplus only) - both must
-            # be deleted before a rebuild, else create_app_component fails
-            # with "project ...\<name>_FSBL already exists".
-            if incremental and plt["name"] in existing:
-                self._rebuildPlatformInPlace(client, plt)
+        try:
+            if selective:
+                self._openExistingWorkspace(client, ws_path)
             else:
-                for stale_name in (plt["name"], f"{plt['name']}_FSBL"):
-                    if stale_name in existing:
-                        LOG(f"Deleting existing component \"{stale_name}\" for rebuild...")
-                        client.delete_component(name=stale_name)
-                self._buildPlatform(client, xsa_path, plt, repo_path)
+                self._prepareWorkspace(client, ws_path)
 
-        for app_name in app_names:
-            if selective and app_name not in apps:
-                continue
-            if incremental and app_name in existing:
-                self._rebuildApplicationInPlace(client, app_name, repo_root)
+            app_names, hw_platforms = self._discoverAppsAndPlatforms(repo_root + f"{sep}src")
+            self._extractPlatformMetadata(hw_platforms)
+
+            if selective:
+                platforms, apps = self._resolveSelectiveTargets(
+                    platforms, apps, app_names, hw_platforms, repo_root
+                    )
+                existing = {c["name"] for c in client.list_components()}
             else:
-                if app_name in existing:
-                    LOG(f"Deleting existing application component \"{app_name}\" for rebuild...")
-                    client.delete_component(name=app_name)
-                self._buildApplication(client, app_name, hw_platforms, repo_root)
+                existing = set()
 
-        dispose()
-        return Workspace.SUCCESS
+            bound_platforms = None
+            if skip_unbound_platforms:
+                bound_platforms = self._getBoundPlatformNames(app_names, hw_platforms, repo_root)
+
+            for xsa_path, plt in hw_platforms.items():
+                if selective and plt["name"] not in platforms:
+                    # Not being rebuilt, but _buildApplication still needs
+                    # "domain_name"/"xpfm" to bind any requested app to it.
+                    self._setPlatformDomainInfo(client, plt)
+                    continue
+                explicitly_requested = selective and plt["name"] in platforms
+                if (bound_platforms is not None and not explicitly_requested
+                        and plt["name"] not in bound_platforms):
+                    LOG(f"Skipping platform \"{plt['name']}\": not referenced by any "
+                       f"application's comp-settings.json (--skip-unbound-platforms)")
+                    continue
+                # _buildPlatform may also create a separate "<name>_FSBL" app
+                # component (see _buildZynqMPFsbl, zynquplus only) - both must
+                # be deleted before a rebuild, else create_app_component fails
+                # with "project ...\<name>_FSBL already exists".
+                if incremental and plt["name"] in existing:
+                    self._rebuildPlatformInPlace(client, plt)
+                else:
+                    for stale_name in (plt["name"], f"{plt['name']}_FSBL"):
+                        if stale_name in existing:
+                            LOG(f"Deleting existing component \"{stale_name}\" for rebuild...")
+                            client.delete_component(name=stale_name)
+                    self._buildPlatform(client, xsa_path, plt, repo_path)
+
+            for app_name in app_names:
+                if selective and app_name not in apps:
+                    continue
+                if incremental and app_name in existing:
+                    self._rebuildApplicationInPlace(client, app_name, repo_root)
+                else:
+                    if app_name in existing:
+                        LOG(f"Deleting existing application component \"{app_name}\" for rebuild...")
+                        client.delete_component(name=app_name)
+                    self._buildApplication(client, app_name, hw_platforms, repo_root)
+
+            return Workspace.SUCCESS
+        finally:
+            # Always dispose the client/server connection, even if an
+            # exception was raised above - otherwise the server process
+            # (and any lock it holds on ws_path) is left dangling for the
+            # next invocation, undermining the retry/dangling-process
+            # handling added elsewhere in this file.
+            dispose()
 
     def _getBoundPlatformNames(self, app_names, hw_platforms, repo_root) -> set:
         """
@@ -1592,6 +1640,15 @@ if __name__ == "__main__":
             "Targets that don't exist yet are always created fresh. Any "
             "HW/domain-level platform change still needs a full rebuild."
         )
+    parser.add_argument(
+        "--allow-process-cleanup", action="store_true",
+        help="Allow force-stopping pre-existing vitis/vitis-server processes "
+            "from the same install if a workspace wipe/select fails. Off by "
+            "default, since a pre-existing process could be an unrelated, "
+            "still-active Vitis session rather than an actual leftover; only "
+            "enable this on a machine/CI runner where no other Vitis session "
+            "runs concurrently."
+        )
     args = parser.parse_args()
 
     lcWs = Workspace()
@@ -1599,5 +1656,6 @@ if __name__ == "__main__":
         platforms=args.platform,
         apps=args.app,
         skip_unbound_platforms=args.skip_unbound_platforms,
-        incremental=args.incremental
+        incremental=args.incremental,
+        allow_process_cleanup=args.allow_process_cleanup
         )
