@@ -33,7 +33,7 @@
     .\_vitis.ps1 -v 2025.2
     .\_vitis.ps1 -v 2025.2 -StopDangling
     .\_vitis.ps1 -v 2025.2 -s .\checkout.py
-    .\_vitis.ps1 -v 2025.2 -s .\checkout.py --platform system_wrapper_tac5112
+    .\_vitis.ps1 -v 2025.2 -s .\checkout.py --platform my_platform
 #>
 param(
     [Parameter(Mandatory = $true)][Alias("v")][string]$Version,

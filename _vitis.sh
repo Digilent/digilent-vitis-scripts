@@ -14,7 +14,7 @@
 # Example: ./_vitis.sh -v 2025.2
 #          ./_vitis.sh -v 2025.2 --stop-dangling
 #          ./_vitis.sh -v 2025.2 -s ./checkout.py
-#          ./_vitis.sh -v 2025.2 -s ./checkout.py --platform system_wrapper_tac5112
+#          ./_vitis.sh -v 2025.2 -s ./checkout.py --platform my_platform
 
 set -euo pipefail
 

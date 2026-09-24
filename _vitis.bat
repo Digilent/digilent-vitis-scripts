@@ -9,7 +9,7 @@ rem Usage: _vitis.bat -v ^<version^> [-i ^<install-path^>] [-s ^<script.py^> [sc
 rem Example: _vitis.bat -v 2025.2
 rem          _vitis.bat -v 2025.2 --stop-dangling
 rem          _vitis.bat -v 2025.2 -s .\checkout.py
-rem          _vitis.bat -v 2025.2 -s .\checkout.py --platform system_wrapper_tac5112
+rem          _vitis.bat -v 2025.2 -s .\checkout.py --platform my_platform
 
 setlocal enabledelayedexpansion
 
