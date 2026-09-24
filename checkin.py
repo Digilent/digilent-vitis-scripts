@@ -22,6 +22,7 @@ from pathlib import Path
 from shutil import copy
 from json import (JSONEncoder, JSONDecoder)
 from re import (compile, RegexFlag)
+from sys import version_info
 from misc import (LOG, MapCmdLineOpts)
 
 class UtilityWS:
@@ -386,38 +387,37 @@ class SrcFilesWS:
         elif path.isdir(pTemp) is True:
             # Copy files into 'src' dir.
             chdir(pTemp)
-            # Find the largest vector.
-            bigLs = dimLsBldFl if dimLsBldFl > dimLsArchFl else dimLsArchFl
-            # Nr of platforms <= Nr of apps;
-            for itemIdx in range(0, bigLs):
-                if itemIdx < dimLsBldFl:
-                    strTempLoc = lApps[itemIdx][lApps[itemIdx].rfind(sep) + 1:]
-                else:
-                    continue
+            # Applications drive lApps/self.lsBldFl (1:1 by construction).
+            for itemIdx in range(0, dimLsBldFl):
+                strTempLoc = lApps[itemIdx][lApps[itemIdx].rfind(sep) + 1:]
                 dTempLoc = path.join(strTempLoc, SrcFilesWS.APP_SRCCODE)
                 # In py <= 3.8, certain modes for mkdir does not exist, so default one is used.
                 if path.isdir(dTempLoc) is not True:
                     makedirs(dTempLoc)
-                    if itemIdx < dimLsArchFl: 
-                        mkdir(self.lsArchPltDir[itemIdx])
                 # Impose read and write access for current files.
                 chmod(self.lsBldFl[itemIdx], S_IRUSR | S_IWUSR)
                 # Check for write protected file in self.lsBldFl.
                 if access(self.lsBldFl[itemIdx], R_OK | W_OK):
                     # Should we use copy2 to preserve metadata instead of copy ?
                     copy(self.lsBldFl[itemIdx], dTempLoc)
-                    if itemIdx < dimLsArchFl:
-                        # Impose read and write access for current files.
-                        chmod(self.lsArchFl[itemIdx], S_IRUSR | S_IWUSR)
-                        # Check for write protected file in self.lsArchFl.
-                        if access(self.lsArchFl[itemIdx], R_OK | W_OK):
-                            copy(self.lsArchFl[itemIdx], self.lsArchPltDir[itemIdx])
-                        else:
-                            LOG(f"File {self.lsArchFl[itemIdx]} is not writable and readable")
                 else:
                     LOG(f"File {self.lsBldFl[itemIdx]} is not writable and readable")
                 # tuple(<app-dirname-src>, <app-dirname>)
                 iRet = self.cpySrcFiles(itemIdx, lApps, (dTempLoc, strTempLoc))
+            # Platforms (XSA handoff files): copied independently of the
+            # application count/loop above, since a workspace can contain
+            # more platforms than applications (e.g. an intentionally
+            # unbound platform kept via --skip-unbound-platforms).
+            for pltIdx in range(0, dimLsArchFl):
+                if path.isdir(self.lsArchPltDir[pltIdx]) is not True:
+                    mkdir(self.lsArchPltDir[pltIdx])
+                # Impose read and write access for current files.
+                chmod(self.lsArchFl[pltIdx], S_IRUSR | S_IWUSR)
+                # Check for write protected file in self.lsArchFl.
+                if access(self.lsArchFl[pltIdx], R_OK | W_OK):
+                    copy(self.lsArchFl[pltIdx], self.lsArchPltDir[pltIdx])
+                else:
+                    LOG(f"File {self.lsArchFl[pltIdx]} is not writable and readable")
             # Handoff (xsa) and build script files have been copied, src files too.
             LOG(f"Matching directories have been created in sw{sep}src")
             return SrcFilesWS.SUCCESS
@@ -586,8 +586,13 @@ class Workspace:
         chdir(pSrcFlLoc)
         # Can store not just SrcFilesWS.lsSrcCpy '*.<some-extension>'.
         for item in SrcFilesWS.lsSrcCpy:
-            # rglob has case_sensitive parameter from py v3.12.
-            srcFiles = list(Path(pSrcFlLoc).rglob(item, case_sensitive=True))
+            # rglob only accepts case_sensitive= from py v3.12; Vitis 2024.1
+            # ships Python 3.8.3, so gate the keyword by version instead of
+            # always passing it (which raises TypeError on older pythons).
+            if version_info >= (3, 12):
+                srcFiles = list(Path(pSrcFlLoc).rglob(item, case_sensitive=True))
+            else:
+                srcFiles = list(Path(pSrcFlLoc).rglob(item))
             if len(srcFiles) != UtilityWS.EMPTY_BUFFER:
                 # [[]] - type
                 self.sfWs.lsTempSrcFl[self.idxApp].append([str(itm) for itm in srcFiles])
@@ -782,7 +787,10 @@ class Workspace:
         if not UtilityWS.IS_DIRS:
             return UtilityWS.FAILURE
         iRet = self.sfWs.collectCpyFiles(self.cfgWs.refLApps)
-        iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
+        if iRet == UtilityWS.SUCCESS:
+            iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
+        else:
+            LOG("collectCpyFiles failed, skipping metadata encoding.")
         # Check if port or ip have been assigned manually.
         if not UtilityWS.SET_IP_PORT:
             UtilityWS.srvCl.stop()
