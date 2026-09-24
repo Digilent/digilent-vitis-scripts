@@ -15,7 +15,8 @@
 """
 from os import (chdir, getcwd, listdir,
                 path, sep, makedirs, mkdir,
-                access, chmod, R_OK, W_OK)
+                access, chmod, R_OK, W_OK,
+                walk, remove)
 from stat import (S_IWUSR, S_IRUSR)
 from vitis import (_build, _server)
 from pathlib import Path
@@ -140,6 +141,13 @@ class UtilityWS:
             dirApp = location[location.rfind(sep) + 1:]
             sPrevWd = getcwd()
             chdir(dirApp)
+            # Reset per-application: self.dConfWs is reused across every
+            # location in this loop, so a setting present for a previous
+            # app but absent from this one's obj.settings must not survive
+            # (previously only the dirApp correlation key was cleared
+            # below, leaking every other stale setting into this app's
+            # generated comp-settings.json).
+            self.dConfWs = {}
             iRet = self.prepDataStruct(bdRes[idx])
             # Add relative path to json settings.
             self.dConfWs[dirApp] = self._dPltAppCorr[dirApp]
@@ -154,7 +162,6 @@ class UtilityWS:
             chdir(sPrevWd)
             if idx < len(bdRes):
                 idx = idx + 1
-                del self.dConfWs[dirApp]
         return UtilityWS.SUCCESS
 
     def prepDataStruct(self,
@@ -178,14 +185,13 @@ class UtilityWS:
         # Extract from a protobuff class metadata.
         for item in obj.settings:
             if len(item.value) != UtilityWS.EMPTY_BUFFER:
-                # Every value-obj has just one element in its list ? ... some maybe not.
-                if len(item.value) == 1:
-                    valLoc = item.value.__getitem__(0)
-                else:
-                    # Copy this list to add to self.dConfWs, dropping any
-                    # parent-relative ("../") entries wherever they occur
-                    # (not just at the end - entries can be interleaved).
-                    valLoc = [v for v in item.value if PTRN_EX.search(v) is None]
+                # Drop any parent-relative ("../") entries wherever they
+                # occur, regardless of how many values this setting has -
+                # a single such entry is just as wrong to keep as one
+                # among several.
+                valLoc = [v for v in item.value if PTRN_EX.search(v) is None]
+                if len(valLoc) == 1:
+                    valLoc = valLoc[0]
                 self.dConfWs[item.key] = valLoc if type(valLoc) is list else [valLoc]
             else:
                 self.dConfWs[item.key] = []
@@ -407,6 +413,20 @@ class SrcFilesWS:
             for pltIdx in range(0, dimLsArchFl):
                 if path.isdir(self.lsArchPltDir[pltIdx]) is not True:
                     mkdir(self.lsArchPltDir[pltIdx])
+                else:
+                    # Remove any previously checked-in XSA(s) for this
+                    # platform dir before copying the current one: if the
+                    # export was renamed since the last check-in, the old
+                    # file would otherwise remain alongside the new one,
+                    # and checkout discovers every ".xsa" it finds, turning
+                    # the stale leftover into a bogus extra platform.
+                    newXsaName = path.basename(self.lsArchFl[pltIdx])
+                    for existing in listdir(self.lsArchPltDir[pltIdx]):
+                        if (existing.lower().endswith(".xsa")
+                                and existing != newXsaName):
+                            stalePath = path.join(self.lsArchPltDir[pltIdx], existing)
+                            remove(stalePath)
+                            LOG(f"Removed stale checked-in XSA: {stalePath}")
                 # Impose read and write access for current files.
                 chmod(self.lsArchFl[pltIdx], S_IRUSR | S_IWUSR)
                 # Check for write protected file in self.lsArchFl.
@@ -457,6 +477,25 @@ class SrcFilesWS:
         # e.g. appIdx=0 is for App1.
         loc, locFMisc = locDuo
         appSrcRoot = path.join(lApps[appIdx], SrcFilesWS.APP_SRCCODE)
+        # Reconcile <app-dirname-src> (loc) against what will actually be
+        # (re)copied this run: a repeated check-in must also remove any
+        # previously checked-in source file whose workspace counterpart was
+        # deleted/renamed since the last check-in, otherwise a later
+        # checkout keeps restoring (and compiling) the stale copy forever.
+        keepRelPaths = set()
+        for item in self._lsTempSrcFl[appIdx]:
+            for subItem in item:
+                if subItem.startswith(appSrcRoot + sep):
+                    keepRelPaths.add(path.relpath(subItem, appSrcRoot))
+        if path.isdir(loc):
+            for dirpath, _, filenames in walk(loc):
+                for filename in filenames:
+                    destAbs = path.join(dirpath, filename)
+                    destRel = path.relpath(destAbs, loc)
+                    if destRel not in keepRelPaths:
+                        remove(destAbs)
+                        LOG(f"Removed stale checked-in source no longer "
+                           f"present in the workspace: {destAbs}")
         for item in self._lsTempSrcFl[appIdx]:
             for subItem in item:
                 # Take all files from each sublist and copy them, preserving
@@ -554,8 +593,11 @@ class Workspace:
         """
         self.idxApp = 0
         self.sfWs = SrcFilesWS()
-        # pattern vector; /i -> case insensitive;
-        self.lsExcludedApps = [compile("fsbl", RegexFlag.IGNORECASE)]
+        # pattern vector; /i -> case insensitive; matches the generated
+        # boot component's exact "<platform>_FSBL" suffix (see checkout.py's
+        # _buildZynqMPFsbl), not merely any name containing "fsbl" anywhere
+        # (which would wrongly exclude e.g. a user app named "fsblinky_test").
+        self.lsExcludedApps = [compile(r"_fsbl$", RegexFlag.IGNORECASE)]
         if UtilityWS.IS_DIRS:
             self.findPlatforms()
             # Set multiple Utility ... ? 'fa(), ...'
@@ -658,10 +700,24 @@ class Workspace:
             if idxPltName == NOT_PATH and idxIfExXpfm == NOT_PATH:
                 # Overwrite if necessary
                 idxIfExXpfm = len(lHwPlt)
+            pltName = lHwPlt[idxPltName + 1:idxIfExXpfm]
             # Pay attention which Utility object is used, bcs encJSON_Ws depends on it.
-            relPathPlt = SrcFilesWS.APP_SRCCODE + sep + \
-                            lHwPlt[idxPltName + 1:idxIfExXpfm] + sep + \
-                            lHwPlt[idxPltName + 1:idxIfExXpfm] + ".xsa"
+            # Look up the actual XSA discovered for this platform (see
+            # findPlatforms) instead of assuming its filename matches the
+            # platform name: checkout disambiguates duplicate XSA stems by
+            # renaming the *platform*, so the real XSA basename can differ,
+            # and a synthesized "<platform>.xsa" guess can point nowhere.
+            relPathPlt = None
+            for archIdx, archPltDir in enumerate(self.sfWs.lsArchPltDir):
+                if archPltDir == pltName:
+                    actualXsaName = path.basename(self.sfWs.lsArchFl[archIdx])
+                    relPathPlt = SrcFilesWS.APP_SRCCODE + sep + pltName + sep + actualXsaName
+                    break
+            if relPathPlt is None:
+                LOG(f"Application \"{appName}\" references platform \"{pltName}\" "
+                   f"which was not found among the discovered platforms; its "
+                   f"comp-settings.json xsa correlation entry may be wrong!")
+                relPathPlt = SrcFilesWS.APP_SRCCODE + sep + pltName + sep + pltName + ".xsa"
             self.cfgWs.utilCfgWs.dPltAppCorr[appName] = relPathPlt
             # Search for build file.
             bFile = list(Path(pItem).rglob(
@@ -782,14 +838,19 @@ class Workspace:
         """
         if not UtilityWS.IS_DIRS:
             return UtilityWS.FAILURE
-        iRet = self.sfWs.collectCpyFiles(self.cfgWs.refLApps)
-        if iRet == UtilityWS.SUCCESS:
-            iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
-        else:
-            LOG("collectCpyFiles failed, skipping metadata encoding.")
-        # Check if port or ip have been assigned manually.
-        if not UtilityWS.SET_IP_PORT:
-            UtilityWS.srvCl.stop()
+        try:
+            iRet = self.sfWs.collectCpyFiles(self.cfgWs.refLApps)
+            if iRet == UtilityWS.SUCCESS:
+                iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
+            else:
+                LOG("collectCpyFiles failed, skipping metadata encoding.")
+        finally:
+            # Stop the locally started Vitis server on every exit path,
+            # including an exception raised above: a copy/JSON/Vitis error
+            # must not leave the server process and workspace lock dangling.
+            # Check if port or ip have been assigned manually.
+            if not UtilityWS.SET_IP_PORT:
+                UtilityWS.srvCl.stop()
         # Clean up .wsdata after vitis-server shutdown if it exists.
         return iRet
 
