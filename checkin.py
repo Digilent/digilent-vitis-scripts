@@ -491,7 +491,7 @@ class SrcFilesWS:
         <app-dirname-src>, no matter how many levels deep a file is nested
         (e.g. src/utils/<any-further-nesting>/foo.c), not just the immediate
         parent dir. The one exception is an extra module directory (e.g.
-        "tac5x1x_tac5142", a small shared driver module) - the workspace
+        "my_shared_module", a small shared driver module) - the workspace
         nests it one level inside the component's own "src"
         (<app-dir-src>/<module>/...), matching where checkout.py's
         _importAppExtraModules put it, but it's checked in as a SIBLING of
