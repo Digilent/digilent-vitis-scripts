@@ -60,10 +60,18 @@ def GetMetadata(**kwargs):
         open_xsa: set to a truthy value to actually open/parse the xsa; if
                   falsy, an empty metadata dict is returned and no HSI call
                   is made.
+
+    @Returns
+    ret_metadata with "target_proc" (the first supported processor found,
+    kept for callers/arch's that only ever use a single processor, e.g.
+    microblaze) and "target_procs" (every supported processor found, in
+    discovery order, so a multi-processor xsa - e.g. a ZynqMP exposing both
+    an A-class and an R5 - can get one domain per processor instead of only
+    ever the first one).
     """
     xsa = ""
     open_xsa = 0
-    ret_metadata = {"arch" : "", "target_proc" : ""}
+    ret_metadata = {"arch" : "", "target_proc" : "", "target_procs" : []}
     for key, value in kwargs.items():
         if key == "xsa":
             xsa = value
@@ -86,8 +94,15 @@ def GetMetadata(**kwargs):
                          proc.IP_NAME == "psv_cortexr5") or
                         proc.IP_NAME == "ps7_cortexa9"
                         ):
-                        ret_metadata["target_proc"] = proc.IP_NAME + "_0"
-                        break
+                        proc_name = proc.IP_NAME + "_0"
+                        # Multi-processor XSAs (e.g. ZynqMP exposing both an
+                        # A-class and an R5) must yield one domain per
+                        # processor, not just the first found: keep scanning
+                        # instead of breaking, and record every one.
+                        if proc_name not in ret_metadata["target_procs"]:
+                            ret_metadata["target_procs"].append(proc_name)
+                        if ret_metadata["target_proc"] == "":
+                            ret_metadata["target_proc"] = proc_name
             finally:
                 # Release the HSI-side hardware design handle whether or
                 # not metadata extraction above succeeded, so a scratch
@@ -263,7 +278,10 @@ class Workspace:
         the "USER_*" settings in comp-settings.json (the one key that is not
         "USER_*"-prefixed), so an application always gets rebuilt against the
         exact XSA variant it was checked in against (e.g. tac5142 vs
-        tac5112), instead of an arbitrary/first-found platform.
+        tac5112), instead of an arbitrary/first-found platform. The entry's
+        value is either a bare xsa path string (older check-ins, before the
+        processor/domain association below was tracked) or a dict with an
+        "xsa" key (see getAppTargetProc); both are accepted here.
 
         @Parameters
         appname: app name, used only for logging context.
@@ -275,16 +293,55 @@ class Workspace:
         more than one candidate key is found.
         """
         dJsonStruct = JSONDecoder().decode(open(filepath).read())
-        candidates = [value for key, value in dJsonStruct.items()
-                     if not key.startswith("USER_") and
-                     isinstance(value, str) and value != ""]
+        candidates = []
+        for key, value in dJsonStruct.items():
+            if key.startswith("USER_"):
+                continue
+            if isinstance(value, str) and value != "":
+                candidates.append(value)
+            elif isinstance(value, dict) and isinstance(value.get("xsa"), str) and value["xsa"] != "":
+                candidates.append(value["xsa"])
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) > 1:
             LOG(f"Application \"{appname}\" has more than one platform/xsa correlation "
                f"entry in {filepath}, cannot determine which one to use: {candidates}")
         return ""
-    
+
+    def getAppTargetProc(self,
+                        appname : str,
+                        filepath=""
+                        ) -> str:
+        """
+        @Description
+        Read the exact processor/domain instance (e.g. "psu_cortexa53_0")
+        this application was bound to at check-in time, stored inside the
+        same platform/xsa correlation entry read by getAppPlatformXsa (see
+        checkin.py's processGatherFiles). Needed on a multi-processor xsa
+        (e.g. a ZynqMP exposing both an A-class and an R5): without it,
+        every application checked in against such a platform would silently
+        get rebuilt against whichever processor _extractPlatformMetadata
+        happens to find first, rather than the one it actually used before
+        check-in. Older comp-settings.json files (checked in before this was
+        tracked) simply won't have it, and _resolveAppDomain falls back to
+        the platform's default processor in that case.
+
+        @Parameters
+        appname: app name, used only for logging context.
+        filepath: comp-setting.json path.
+
+        @Returns
+        The recorded cpu instance name (e.g. "psu_cortexa53_0"), or "" if
+        none is recorded.
+        """
+        dJsonStruct = JSONDecoder().decode(open(filepath).read())
+        for key, value in dJsonStruct.items():
+            if key.startswith("USER_"):
+                continue
+            if isinstance(value, dict) and isinstance(value.get("cpu_instance"), str):
+                return value["cpu_instance"]
+        return ""
+
     def quietBuild(self, buildFn, desc="") -> None:
         """
         @Description
@@ -400,8 +457,16 @@ class Workspace:
         ignore_rule = f"/{ws_name}/*"
         if path.isfile(gitignore_path):
             with open(gitignore_path, "r", encoding="utf-8") as f:
-                if ignore_rule in f.read():
-                    return
+                # Compare whole, active (non-comment) lines instead of a
+                # substring search: a commented-out rule (e.g. "#/ws/*")
+                # or an unrelated, differently-anchored path (e.g.
+                # "/generated/ws/*") both contain ignore_rule as a
+                # substring, which would wrongly be treated as "already
+                # installed" and leave the generated workspace untracked.
+                existing_lines = {line.strip() for line in f
+                                  if line.strip() and not line.strip().startswith("#")}
+            if ignore_rule in existing_lines:
+                return
         lines = [f"# ignore everything in the generated {ws_name} workspace",
                 f"# (added automatically by checkout.py, see README Note #2)",
                 ignore_rule
@@ -438,10 +503,25 @@ class Workspace:
         self._buildLogPath, where every subsequent component build's full
         log is kept (see quietBuild).
 
+        Ownership/lock availability is validated with a first
+        set_workspace call (see _setWorkspaceWithRetry) BEFORE any content
+        is cleared, and the wipe only proceeds once that succeeds: on
+        Unix, deleting a file another process still has open does not fail
+        (nor is it prevented on Windows for every file, only ones actually
+        locked), so wiping first and only then discovering a lock via a
+        failed set_workspace can already have destroyed an actively used
+        workspace's unlocked project files by the time the one locked file
+        is reached. set_workspace is called again after the wipe, since
+        clearing ws_path's contents also removes the "_ide" workspace
+        metadata the first call just created.
+
         @Parameters
         client: Vitis client obj returned by create_client().
         ws_path: absolute path to the workspace directory to (re)create.
         """
+        makedirs(ws_path, exist_ok=True)
+        self._setWorkspaceWithRetry(client, ws_path)
+
         max_try = 5
         for attempt in range(1, max_try + 1):
             try:
@@ -679,7 +759,8 @@ class Workspace:
 
         @Parameters
         hw_platforms: dict produced by _discoverAppsAndPlatforms, mutated in
-                     place with "arch"/"target_proc" keys added.
+                     place with "arch"/"target_proc"/"target_procs" keys
+                     added.
         """
         start_time = time.time()
 
@@ -688,10 +769,12 @@ class Workspace:
             plt["arch"] = metadata["arch"]
             if plt["arch"] in ("spartan7", "artix7", "kintex7"):
                 plt["target_proc"] = "microblaze_0"
+                plt["target_procs"] = [plt["target_proc"]]
             else:
                 plt["target_proc"] = metadata["target_proc"]
+                plt["target_procs"] = metadata["target_procs"]
             LOG(f"Platform \"{plt['name']}\": detected arch \"{plt['arch']}\", "
-               f"using target processor \"{plt['target_proc']}\"")
+               f"available target processor(s): {plt['target_procs']}")
 
         execution_time = time.time() - start_time
         LOG(f"Hardware metadata extraction took {execution_time:.4f} seconds")
@@ -926,7 +1009,13 @@ class Workspace:
         Create, configure and build ONE platform component from an already
         HSI-inspected entry (see _extractPlatformMetadata), including the
         ZynqMP FSBL domain/application when needed (see _buildZynqMPFsbl).
-        Adds "domain_name"/"xpfm" to `plt` for later use by _buildApplication.
+        Adds one domain per entry in plt["target_procs"] (e.g. a ZynqMP xsa
+        exposing both an A-class and an R5 gets a domain for each, instead
+        of only ever the first processor found), so an application checked
+        in bound to a specific processor (see getAppTargetProc) can later be
+        rebuilt against that same domain rather than an arbitrary one.
+        Adds "domains"/"domain_name"/"xpfm" to `plt` for later use by
+        _buildApplication (see _setPlatformDomainInfo).
 
         @Parameters
         client: Vitis client obj returned by create_client().
@@ -937,9 +1026,8 @@ class Workspace:
         """
         name = plt["name"]
         arch = plt["arch"]
-        target_proc = plt["target_proc"]
+        target_procs = plt["target_procs"]
         is_microblaze = arch in ("spartan7", "artix7", "kintex7")
-        domain_name = "domain_microblaze_0" if is_microblaze else f"domain_{target_proc}"
 
         LOG(f"Creating platform component \"{name}\" from {xsa_path}...")
         platform_kwargs = {"name": name, "hw_design": xsa_path}
@@ -947,40 +1035,44 @@ class Workspace:
             platform_kwargs["no_boot_bsp"] = True
         platform = client.create_platform_component(**platform_kwargs)
         platform.update_desc(desc=name)
+        self._writePlatformSourceDirManifest(platform, plt["hw_pf_dir"])
 
-        LOG(f"Adding domain \"{domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
-        # support_app must match the template _buildApplication actually uses
-        # ("empty_application", see below) so the domain's BSP is generated
-        # for the same app shape our real apps get built against; leaving
-        # this as "hello_world" causes a mismatched BSP that can fail its own
-        # CMake toolchain test when a second platform is built in the same
-        # workspace/session.
-        domain = platform.add_domain(
-            cpu=target_proc,
-            os="standalone",
-            name=domain_name,
-            display_name=domain_name,
-            support_app="empty_application"
-            )
+        for target_proc in target_procs:
+            domain_name = "domain_microblaze_0" if is_microblaze else f"domain_{target_proc}"
 
-        # Vitis 2025.2 bug: for a "regular" (non-FSBL) domain, the generated
-        # <proc>_toolchain.cmake sets CMAKE_C_FLAGS/CXX_FLAGS/ASM_FLAGS via
-        # plain, non-FORCE `set(... CACHE STRING ...)` calls, which CMake's
-        # own first-configure CACHE-seeding silently wins against (leaving
-        # them at whatever CMAKE_<LANG>_FLAGS_INIT/$ENV{CFLAGS,CXXFLAGS}
-        # provided, or blank for ASM) instead of the toolchain file's
-        # intended "${TOOLCHAIN_..._FLAGS} ... -specs=${CMAKE_SPECS_FILE}
-        # ..." value - so every regular domain's BSP silently compiles with
-        # the wrong flags/specs (missing -DSDT, dependency flags, and the
-        # domain's own Xilinx.spec), causing "initializer element is not
-        # computable at load time"/undeclared XPAR_* build failures further
-        # down the pipeline. _fixDomainCmakeFlags reconstructs and
-        # overwrites the correct values directly in the domain's
-        # CMakeCache.txt afterwards.
-        self._fixDomainCmakeFlags(client.get_workspace(), name, domain_name)
+            LOG(f"Adding domain \"{domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
+            # support_app must match the template _buildApplication actually uses
+            # ("empty_application", see below) so the domain's BSP is generated
+            # for the same app shape our real apps get built against; leaving
+            # this as "hello_world" causes a mismatched BSP that can fail its own
+            # CMake toolchain test when a second platform is built in the same
+            # workspace/session.
+            domain = platform.add_domain(
+                cpu=target_proc,
+                os="standalone",
+                name=domain_name,
+                display_name=domain_name,
+                support_app="empty_application"
+                )
 
-        if is_microblaze:
-            self._configureMicroblazeDomain(domain, domain_name)
+            # Vitis 2025.2 bug: for a "regular" (non-FSBL) domain, the generated
+            # <proc>_toolchain.cmake sets CMAKE_C_FLAGS/CXX_FLAGS/ASM_FLAGS via
+            # plain, non-FORCE `set(... CACHE STRING ...)` calls, which CMake's
+            # own first-configure CACHE-seeding silently wins against (leaving
+            # them at whatever CMAKE_<LANG>_FLAGS_INIT/$ENV{CFLAGS,CXXFLAGS}
+            # provided, or blank for ASM) instead of the toolchain file's
+            # intended "${TOOLCHAIN_..._FLAGS} ... -specs=${CMAKE_SPECS_FILE}
+            # ..." value - so every regular domain's BSP silently compiles with
+            # the wrong flags/specs (missing -DSDT, dependency flags, and the
+            # domain's own Xilinx.spec), causing "initializer element is not
+            # computable at load time"/undeclared XPAR_* build failures further
+            # down the pipeline. _fixDomainCmakeFlags reconstructs and
+            # overwrites the correct values directly in the domain's
+            # CMakeCache.txt afterwards.
+            self._fixDomainCmakeFlags(client.get_workspace(), name, domain_name)
+
+            if is_microblaze:
+                self._configureMicroblazeDomain(domain, domain_name)
 
         self.quietBuild(platform.build, f"platform \"{name}\"")
 
@@ -992,23 +1084,37 @@ class Workspace:
     def _setPlatformDomainInfo(self, client, plt) -> None:
         """
         @Description
-        Set "domain_name"/"xpfm" on `plt`, used by _buildApplication to
-        resolve/bind an application to its platform. Split out of
-        _buildPlatform so checkOutSF can also call it for a platform that is
-        being intentionally left alone during a selective rebuild (see
-        --platform/--app), whose "domain_name"/"xpfm" would otherwise never
-        get filled in without rebuilding it (both are pure functions of
-        plt's own "name"/"arch"/"target_proc", already known from
-        _extractPlatformMetadata, not of anything the actual build produces).
+        Set "domains"/"domain_name"/"xpfm" on `plt`, used by
+        _buildApplication to resolve/bind an application to its platform.
+        Split out of _buildPlatform so checkOutSF can also call it for a
+        platform that is being intentionally left alone during a selective
+        rebuild (see --platform/--app), whose "domains"/"domain_name"/
+        "xpfm" would otherwise never get filled in without rebuilding it
+        (all are pure functions of plt's own "name"/"arch"/"target_proc"/
+        "target_procs", already known from _extractPlatformMetadata, not of
+        anything the actual build produces).
 
         @Parameters
         client: Vitis client obj returned by create_client().
         plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms/
-            _extractPlatformMetadata), needs "name"/"arch"/"target_proc".
+            _extractPlatformMetadata), needs "name"/"arch"/"target_proc"/
+            "target_procs".
         """
         name = plt["name"]
         is_microblaze = plt["arch"] in ("spartan7", "artix7", "kintex7")
-        plt["domain_name"] = "domain_microblaze_0" if is_microblaze else f"domain_{plt['target_proc']}"
+        plt["domains"] = {
+            target_proc: ("domain_microblaze_0" if is_microblaze else f"domain_{target_proc}")
+            for target_proc in plt["target_procs"]
+            }
+        # Default/fallback domain (e.g. for an app with no recorded
+        # processor association, see _resolveAppDomain): the platform's
+        # primary processor, i.e. the first one _extractPlatformMetadata
+        # found - kept as its own key for backward compatibility with
+        # anything still expecting a single "domain_name" per platform.
+        plt["domain_name"] = plt["domains"].get(
+            plt["target_proc"],
+            next(iter(plt["domains"].values()), f"domain_{plt['target_proc']}")
+            )
         plt["xpfm"] = (client.get_workspace() + sep + name + sep +
                        "export" + sep + name + sep + name + ".xpfm")
 
@@ -1133,6 +1239,30 @@ class Workspace:
         with open(self._extraModulesManifestPath(app), "w") as f:
             f.writelines(f"{name}\n" for name in sorted(module_names))
 
+    def _writePlatformSourceDirManifest(self, platform, hw_pf_dir) -> None:
+        """
+        @Description
+        Record the platform's original "src" folder name (e.g.
+        "3eg_audio_hw_pf") into a small manifest file inside the platform's
+        own workspace component dir, so checkin.py can check the xsa back
+        into that same folder even when the workspace platform component
+        name differs from it (see _discoverAppsAndPlatforms: the component
+        is named after the xsa's own stem, disambiguated with the hw_pf
+        folder name only on a stem collision). Without this, check-in would
+        create a brand-new "src/<xsa-stem>" dir named after the component
+        instead, orphaning the original folder's stale xsa for the next
+        checkout to rediscover as a bogus duplicate platform.
+
+        @Parameters
+        platform: platform component obj, just created by
+                 client.create_platform_component.
+        hw_pf_dir: absolute path to the platform's original containing
+                  folder under `src` (see _discoverAppsAndPlatforms).
+        """
+        manifest_path = path.join(platform.component_location, ".digilent_source_dir")
+        with open(manifest_path, "w") as f:
+            f.write(path.basename(hw_pf_dir) + "\n")
+
     def _rebuildApplicationInPlace(self, client, app_name, repo_root) -> None:
         """
         @Description
@@ -1255,6 +1385,40 @@ class Workspace:
            f"of the {len(hw_platforms)} detected platforms to use!")
         return None
 
+    def _resolveAppDomain(self, app_name, comp_settings_path, plt) -> str:
+        """
+        @Description
+        Pick which of the platform's domains (see _setPlatformDomainInfo)
+        `app_name` should be bound to, based on the exact processor/domain
+        instance recorded for it at check-in time (see getAppTargetProc).
+        Needed on a multi-processor xsa (e.g. a ZynqMP exposing both an
+        A-class and an R5), where a platform now has more than one domain
+        (see _buildPlatform) and blindly using the platform's default
+        domain would rebuild every app on whichever processor happens to
+        be first, losing its original CPU association. Falls back to the
+        platform's default/first-detected processor's domain when no such
+        entry is recorded (older comp-settings.json, or a brand-new app
+        never checked in before) or it does not match any domain actually
+        available on this platform.
+
+        @Parameters
+        app_name: application folder name under `src`, used only for logging.
+        comp_settings_path: absolute path to this app's comp-settings.json.
+        plt: entry from the hw_platforms dict (see _setPlatformDomainInfo),
+            needs "domains"/"domain_name"/"name".
+
+        @Returns
+        The domain name to bind `app_name` to.
+        """
+        target_proc = self.getAppTargetProc(app_name, filepath=comp_settings_path)
+        if target_proc != "" and target_proc in plt["domains"]:
+            return plt["domains"][target_proc]
+        if target_proc != "":
+            LOG(f"Application \"{app_name}\" was checked in bound to processor "
+               f"\"{target_proc}\", which is not available on platform "
+               f"\"{plt['name']}\"; defaulting to \"{plt['domain_name']}\"")
+        return plt["domain_name"]
+
     def _buildApplication(self, client, app_name, hw_platforms, repo_root) -> None:
         """
         @Description
@@ -1276,11 +1440,13 @@ class Workspace:
         if plt is None:
             return
 
-        LOG(f"Creating application component \"{app_name}\" for platform \"{plt['name']}\"...")
+        domain_name = self._resolveAppDomain(app_name, comp_settings_path, plt)
+        LOG(f"Creating application component \"{app_name}\" for platform \"{plt['name']}\" "
+           f"(domain \"{domain_name}\")...")
         app = client.create_app_component(
             name=app_name,
             platform=plt["xpfm"],
-            domain=plt["domain_name"],
+            domain=domain_name,
             template="empty_application"
         )
         # Extract saved settings.
