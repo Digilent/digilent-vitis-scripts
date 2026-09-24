@@ -5,7 +5,7 @@ rem python script (checkin.py/checkout.py/...) with it -- meant as a
 rem `vitis -s <script>` counterpart that also picks the Vitis version and
 rem does not require `vitis` to already be reachable from PATH.
 rem
-rem Usage: _vitis.bat -v ^<version^> [-s ^<script.py^> [script args...]] [--stop-dangling]
+rem Usage: _vitis.bat -v ^<version^> [-i ^<install-path^>] [-s ^<script.py^> [script args...]] [--stop-dangling]
 rem Example: _vitis.bat -v 2025.2
 rem          _vitis.bat -v 2025.2 --stop-dangling
 rem          _vitis.bat -v 2025.2 -s .\checkout.py
@@ -21,6 +21,7 @@ set "SELF_DIR=%~dp0"
 set "VERSION="
 set "SCRIPT="
 set "STOP_DANGLING=0"
+set "INSTALL_PATH="
 set "SCRIPT_ARGS="
 
 :parse_args
@@ -33,6 +34,12 @@ if /I "%~1"=="-v" (
 )
 if /I "%~1"=="-s" (
     set "SCRIPT=%~2"
+    shift
+    shift
+    goto parse_args
+)
+if /I "%~1"=="-i" (
+    set "INSTALL_PATH=%~2"
     shift
     shift
     goto parse_args
@@ -50,7 +57,7 @@ goto parse_args
 :after_args
 
 if not defined VERSION (
-    echo Usage: _vitis.bat -v ^<version^> [-s ^<script.py^>] [--stop-dangling]
+    echo Usage: _vitis.bat -v ^<version^> [-i ^<install-path^>] [-s ^<script.py^>] [--stop-dangling]
     exit /b 1
 )
 
@@ -68,6 +75,13 @@ if defined SCRIPT if not "%SCRIPT_COLON%"==":" set "SCRIPT=%SELF_DIR%%SCRIPT%"
 
 rem Same rename AMD did for Vivado (Xilinx -^> AMDDesignTools) applies to Vitis.
 set "VITIS_ROOT="
+if defined INSTALL_PATH (
+    rem INSTALL_PATH may already be the "...\Vitis" root itself, or one of
+    rem the two known layouts under it - try all three directly first.
+    if exist "%INSTALL_PATH%\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PATH%"
+    if not defined VITIS_ROOT if exist "%INSTALL_PATH%\%VERSION%\Vitis\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PATH%\%VERSION%\Vitis"
+    if not defined VITIS_ROOT if exist "%INSTALL_PATH%\Vitis\%VERSION%\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PATH%\Vitis\%VERSION%"
+)
 for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
     for %%N in (AMDDesignTools Xilinx) do (
         if not defined VITIS_ROOT if exist "%%D:\%%N\%VERSION%\Vitis\bin\vitis.bat" set "VITIS_ROOT=%%D:\%%N\%VERSION%\Vitis"
@@ -81,13 +95,13 @@ if not defined VITIS_ROOT (
 )
 
 if "%STOP_DANGLING%"=="1" (
-    rem "vitis.exe"/"vitis-server.exe" are unambiguous, but "eclipse.exe"/
-    rem "java.exe" are generic image names also used by unrelated apps, so
-    rem those two are only killed once their own ExecutablePath is confirmed
-    rem to live under this VITIS_ROOT (avoids taking down some unrelated
-    rem Java/Eclipse-based program left running on the machine).
+    rem VITIS_ROOT is always resolved by this point, so every matched
+    rem process name (including the otherwise-unambiguous "vitis.exe"/
+    rem "vitis-server.exe") is scoped to it - never touches a different
+    rem Vitis install's processes, or an unrelated Java/Eclipse-based
+    rem program left running on the machine.
     powershell -NoProfile -NonInteractive -Command ^
-        "Get-CimInstance Win32_Process | Where-Object { ('vitis.exe','vitis-server.exe') -contains $_.Name -or (('eclipse.exe','java.exe') -contains $_.Name -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith('%VITIS_ROOT%'.ToLower())) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        "Get-CimInstance Win32_Process | Where-Object { ('vitis.exe','vitis-server.exe','eclipse.exe','java.exe') -contains $_.Name -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith('%VITIS_ROOT%'.ToLower()) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 )
 
 set "VITIS_PYTHON="

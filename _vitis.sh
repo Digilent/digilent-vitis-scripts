@@ -20,11 +20,6 @@ set -euo pipefail
 
 ROOT_DIR_NAMES=(AMDDesignTools Xilinx)
 PROC_NAMES=(vitis vitis-server eclipse java)
-# "vitis"/"vitis-server" are unambiguous, but "eclipse"/"java" are generic
-# image names also used by unrelated apps, so those two are only killed
-# once their own /proc/<pid>/exe is confirmed to live under the Vitis
-# install in use (see stop_dangling_processes), never by bare name alone.
-GENERIC_PROC_NAMES=(eclipse java)
 
 usage() {
     echo "Usage: $0 -v <version> [-s <script.py>] [--stop-dangling] [-i <install-path>]" >&2
@@ -67,17 +62,16 @@ stop_dangling_processes() {
     for name in "${PROC_NAMES[@]}"; do
         pids=$(pgrep -x "$name" 2>/dev/null || true)
         for pid in $pids; do
-            is_generic=0
-            for g in "${GENERIC_PROC_NAMES[@]}"; do
-                [ "$g" = "$name" ] && is_generic=1
-            done
-            if [ "$is_generic" -eq 1 ]; then
-                exe_path="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
-                case "$exe_path" in
-                    "$vitis_root"/*) ;;
-                    *) continue ;;
-                esac
-            fi
+            # vitis_root is always resolved by this point, so every
+            # matched name (including the otherwise-unambiguous "vitis"/
+            # "vitis-server") is scoped to it - never touches a different
+            # Vitis install's processes, or an unrelated Java/Eclipse-based
+            # program left running on the machine.
+            exe_path="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+            case "$exe_path" in
+                "$vitis_root"/*) ;;
+                *) continue ;;
+            esac
             if kill -9 "$pid" 2>/dev/null; then
                 echo "Stopped $name (pid=$pid)"
             fi
@@ -93,7 +87,9 @@ VITIS_ROOT=""
 #    helper + process substitution) to stay usable on minimal/older shells.
 if [ -n "$INSTALL_PATH" ]; then
     for base in "$INSTALL_PATH" "$(dirname "$INSTALL_PATH")"; do
-        for candidate in "$base/$VERSION/Vitis/bin/vitis" "$base/Vitis/$VERSION/bin/vitis"; do
+        # base may already be the ".../Vitis" root itself, so check that
+        # directly first, before the two known nested layouts.
+        for candidate in "$base/bin/vitis" "$base/$VERSION/Vitis/bin/vitis" "$base/Vitis/$VERSION/bin/vitis"; do
             if [ -f "$candidate" ]; then
                 VITIS_ROOT="$(dirname "$(dirname "$candidate")")"
                 break 2

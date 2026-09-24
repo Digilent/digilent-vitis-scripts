@@ -21,8 +21,9 @@
 
 .PARAMETER InstallPath
     Optional install path to try first (equivalent to config.ini's
-    VivadoInstallPath on the Vivado side). Both "<path>\<ver>\Vitis" and
-    "<path>\Vitis\<ver>" layouts are tried, and the same under its parent.
+    VivadoInstallPath on the Vivado side). Checked directly as a "...\Vitis"
+    root itself, and via both "<path>\<ver>\Vitis" and "<path>\Vitis\<ver>"
+    layouts under it and under its parent.
 
 .PARAMETER StopDangling
     Stop dangling vitis/vitis-server/eclipse/java processes before doing
@@ -45,11 +46,6 @@ param(
 # Same rename AMD did for Vivado (Xilinx -> AMDDesignTools) applies to Vitis.
 $RootDirNames = @("AMDDesignTools", "Xilinx")
 $ProcNames = @("vitis", "vitis-server", "eclipse", "java")
-# "vitis"/"vitis-server" are unambiguous, but "eclipse"/"java" are generic
-# image names also used by unrelated apps, so those two are only stopped
-# once their own Path is confirmed to live under the Vitis install in use
-# (see Stop-DanglingVitisProcesses), never by bare name alone.
-$GenericProcNames = @("eclipse", "java")
 
 function Get-LayoutCandidates([string]$RootBase, [string]$Ver) {
     @(
@@ -63,6 +59,9 @@ function Find-VitisRoot([string]$Ver, [string]$Configured) {
     if ($Configured) {
         $resolved = (Resolve-Path -LiteralPath $Configured -ErrorAction SilentlyContinue).Path
         if ($resolved) {
+            # $resolved may already be the "...\Vitis" root itself (as
+            # documented for -InstallPath/-i), so check that directly too.
+            $candidates += (Join-Path $resolved (Join-Path "bin" "vitis.bat"))
             $candidates += Get-LayoutCandidates $resolved $Ver
             $candidates += Get-LayoutCandidates (Split-Path $resolved -Parent) $Ver
         }
@@ -112,10 +111,13 @@ function Stop-DanglingVitisProcesses([string]$VitisRoot) {
     foreach ($name in $ProcNames) {
         $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
         foreach ($p in $procs) {
-            if ($GenericProcNames -contains $name) {
-                if (-not $VitisRoot -or -not $p.Path -or -not $p.Path.ToLower().StartsWith($VitisRoot.ToLower())) {
-                    continue
-                }
+            # VitisRoot is always resolved by this point, so every matched
+            # name (including the otherwise-unambiguous "vitis"/
+            # "vitis-server") is scoped to it - never touches a different
+            # Vitis install's processes, or an unrelated Java/Eclipse-based
+            # program left running on the machine.
+            if (-not $VitisRoot -or -not $p.Path -or -not $p.Path.ToLower().StartsWith($VitisRoot.ToLower())) {
+                continue
             }
             try {
                 Stop-Process -Id $p.Id -Force -ErrorAction Stop
