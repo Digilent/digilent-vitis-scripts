@@ -18,6 +18,7 @@ from vitis import create_client, dispose
 import argparse
 import time
 import sys
+import platform
 from datetime import datetime
 import shutil
 from re import (search, compile, RegexFlag)
@@ -35,7 +36,7 @@ from misc import (LOG, stopDanglingVitisProcesses)
 # compile_commands.json, ...) live side by side; anything else with no
 # source counterpart is left untouched rather than guessed at.
 PRUNABLE_SRC_FILE_EXTENSIONS = frozenset({
-    ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".s", ".S", ".ld"
+    ".c", ".cc", ".cpp", ".cxx", ".c++", ".C", ".h", ".hh", ".hpp", ".hxx", ".s", ".S", ".ld"
     })
 
 # Captured once, at module load (before create_client() ever spawns a
@@ -368,6 +369,44 @@ class Workspace:
                 except PermissionError:
                     self._forceRemoveReadonly(remove, entry_path, None)
 
+    def _ensureParentGitignore(self, ws_path) -> None:
+        """
+        @Description
+        Make sure the parent repository (the one containing ws_path as a
+        sibling of the `scripts` submodule, per README Note #2) has a
+        .gitignore rule keeping this generated workspace out of `git
+        status`, while still tracking PRESERVED_WS_ENTRIES. Nothing else in
+        a fresh setup (following the README) creates this file: the old
+        Tcl-era workflow used to install `sub/template.gitignore` here, but
+        that mechanism was dropped when this repo moved to the Python
+        checkin/checkout scripts, without a replacement - so without this,
+        the entire generated workspace would be exposed to the parent
+        repository on first run. A no-op if the rule is already present.
+
+        @Parameters
+        ws_path: absolute path to the workspace directory being (re)created.
+        """
+        repo_root = path.dirname(ws_path)
+        gitignore_path = path.join(repo_root, ".gitignore")
+        ws_name = path.basename(ws_path)
+        ignore_rule = f"/{ws_name}/*"
+        if path.isfile(gitignore_path):
+            with open(gitignore_path, "r", encoding="utf-8") as f:
+                if ignore_rule in f.read():
+                    return
+        lines = [f"# ignore everything in the generated {ws_name} workspace",
+                f"# (added automatically by checkout.py, see README Note #2)",
+                ignore_rule
+                ]
+        for entry in sorted(self.PRESERVED_WS_ENTRIES):
+            lines.append(f"!/{ws_name}/{entry}")
+        needs_leading_blank = path.isfile(gitignore_path) and path.getsize(gitignore_path) > 0
+        with open(gitignore_path, "a", encoding="utf-8") as f:
+            if needs_leading_blank:
+                f.write("\n")
+            f.write("\n".join(lines) + "\n")
+        LOG(f"Added workspace ignore rules to {gitignore_path}")
+
     def _prepareWorkspace(self, client, ws_path) -> None:
         """
         @Description
@@ -419,6 +458,7 @@ class Workspace:
 
         self._setWorkspaceWithRetry(client, ws_path)
         makedirs(ws_path, exist_ok=True)
+        self._ensureParentGitignore(ws_path)
         self._wsPath = ws_path
         self._buildLogPath = path.join(ws_path, "checkout_build.log")
         LOG(f"Successfully created Vitis client on workspace {client.get_workspace()}")
@@ -522,17 +562,23 @@ class Workspace:
         app_names = []
         xsa_files = []
 
-        for dirpath, dirnames, filenames in walk(src_root):
-            for dirname in dirnames:
-                if dirname == "src":
-                    application_name = path.basename(dirpath)
-                    if application_name not in app_names:
-                        app_names.append(application_name)
-                        LOG(f"Detected application: {application_name}")
-
-            for filename in filenames:
-                if filename.endswith(".xsa"):
-                    xsa_files.append(path.join(dirpath, filename))
+        # Only direct children of src_root are applications/platforms per
+        # the documented layout (README "Note #2"): a fully recursive walk
+        # would wrongly turn a nested "src/my_app/src/vendor/src/..." layout
+        # into a bogus "vendor" application, and would pick up any .xsa
+        # found anywhere under an app's own src tree (e.g. a test fixture)
+        # as a spurious extra platform.
+        for entry in listdir(src_root):
+            entry_path = path.join(src_root, entry)
+            if not path.isdir(entry_path):
+                continue
+            if path.isdir(path.join(entry_path, "src")):
+                app_names.append(entry)
+                LOG(f"Detected application: {entry}")
+            for filename in listdir(entry_path):
+                filepath = path.join(entry_path, filename)
+                if path.isfile(filepath) and filename.endswith(".xsa"):
+                    xsa_files.append(filepath)
 
         LOG(f"Detected {len(app_names)} application(s): {app_names}")
 
@@ -1112,6 +1158,31 @@ class Workspace:
         self._importAppExtraModules(app, app_name, repo_root)
         self._buildAppWithFlagsRetry(app, app_name, " (incremental)")
 
+    @staticmethod
+    def _normalizeXsaPathForCompare(xsa_path) -> str:
+        """
+        @Description
+        Normalize an xsa path for cross-platform/host comparison: the
+        correlation path stored in comp-settings.json is written with
+        whatever separator the check-in host used, so a Windows-checked-in
+        value (e.g. "src\\platform\\design.xsa") would never match a
+        Linux-discovered path (which only uses "/") without first folding
+        both to a common separator. Also folds case on Windows, where the
+        filesystem (and thus path.normpath) is case-insensitive.
+
+        @Parameters
+        xsa_path: an absolute or comp-settings.json-relative xsa path,
+                  possibly using either "/" or "\\" as separator.
+
+        @Returns
+        A normalized string suitable for direct "==" comparison against
+        another path normalized the same way.
+        """
+        normalized = path.normpath(xsa_path.replace("\\", "/").replace("/", sep))
+        if platform.system() == "Windows":
+            normalized = normalized.lower()
+        return normalized
+
     def _resolveAppPlatform(self, app_name, comp_settings_path, hw_platforms, repo_root):
         """
         @Description
@@ -1135,12 +1206,19 @@ class Workspace:
         """
         requested_xsa = self.getAppPlatformXsa(app_name, filepath=comp_settings_path)
         if requested_xsa != "":
-            requested_xsa_abs = path.normpath(path.join(repo_root, requested_xsa))
+            requested_xsa_abs = self._normalizeXsaPathForCompare(
+                path.join(repo_root, requested_xsa))
             for xsa_path, candidate in hw_platforms.items():
-                if path.normpath(xsa_path) == requested_xsa_abs:
+                if self._normalizeXsaPathForCompare(xsa_path) == requested_xsa_abs:
                     return candidate
+            # The app explicitly named an XSA and it wasn't found: do NOT
+            # fall back to "the only detected platform" below, since that
+            # would silently bind the app to a platform it never asked
+            # for (defeating the stored hardware association and possibly
+            # building for the wrong target).
             LOG(f"Application \"{app_name}\" references XSA \"{requested_xsa}\" "
                f"which was not found among the detected platforms!")
+            return None
 
         if len(hw_platforms) == 1:
             plt = next(iter(hw_platforms.values()))
@@ -1459,6 +1537,15 @@ class Workspace:
             self._extractPlatformMetadata(hw_platforms)
 
             if selective:
+                known_platform_names = {plt["name"] for plt in hw_platforms.values()}
+                unknown_platforms = platforms - known_platform_names
+                if unknown_platforms:
+                    # An unknown --platform value must fail loudly instead
+                    # of silently matching nothing: otherwise the run
+                    # "succeeds" having rebuilt nothing for a typo'd name.
+                    LOG(f"Unknown --platform value(s) {sorted(unknown_platforms)}: "
+                       f"no such platform among {sorted(known_platform_names)}.")
+                    return Workspace.FAILURE
                 platforms, apps = self._resolveSelectiveTargets(
                     platforms, apps, app_names, hw_platforms, repo_root
                     )
