@@ -18,6 +18,9 @@ find $script_dir -type f ! -name 'cleanup.sh'  \
 			 ! -name 'checkin.py'  \
 			 ! -name 'checkout.py' \
 			 ! -name 'misc.py'	   \
+			 ! -name '_vitis.ps1'  \
+			 ! -name '_vitis.bat'  \
+			 ! -name '_vitis.sh'   \
 			 ! -name 'LICENSE'     \
 			 ! -name 'README.md'   \
 			   -exec rm -rf {} +

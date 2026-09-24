@@ -17,6 +17,9 @@ attrib +R .\cleanup.cmd
 attrib +R .\checkin.py
 attrib +R .\checkout.py
 attrib +R .\misc.py
+attrib +R .\_vitis.ps1
+attrib +R .\_vitis.bat
+attrib +R .\_vitis.sh
 attrib +R .\LICENSE
 attrib +R .\README.md
 

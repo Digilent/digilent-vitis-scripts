@@ -120,3 +120,44 @@ You can now use the `Git` bash to check what files under the `src` folder have b
 and what you would need to commit to `Git`.
 
 ----
+
+## Running Scripts Without Vitis Environment Variables
+
+`_vitis.ps1` / `_vitis.bat` / `_vitis.sh` are OS-native launchers that mimic
+`vitis -s <script>` without requiring Vitis to be on the `PATH` or any Vitis
+environment variables to be set. They locate a Vitis install on disk (trying
+both the legacy `Xilinx` and the post-2025.1 `AMDDesignTools` root folder
+names, on all Windows drives or under `/opt`, `/tools`, `$HOME` on Linux),
+then invoke the bundled Python interpreter directly with the `PYTHONPATH`
+needed to `import vitis`. They can be run from any directory: the `-Script`
+argument is resolved relative to the launcher's own location if it is not
+already an absolute/rooted path, so calling them from the repository root,
+from `sw`, or from anywhere else works the same way.
+
+`-Version`/`-v` selects which installed Vitis version to use (e.g. `2025.2`).
+`-InstallPath`/`-i` can be given to search a specific install root first,
+useful when multiple versions/vendors are installed side-by-side.
+`-Script`/`-s` is the script to run; if omitted, only the Vitis
+install/python/PYTHONPATH info is printed (no script runs) - useful to
+sanity-check what a given `-v`/`-i` resolves to. Any remaining arguments
+are forwarded to the script. `--stop-dangling` looks for leftover Vitis
+processes (e.g. a `.lock` file's server left running after the IDE was
+closed, see **Special Note** above) and stops them before proceeding -
+scoped to processes actually launched from the resolved Vitis install (an
+unrelated `java`/`eclipse` process elsewhere on the machine is left alone).
+
+Examples (run from any directory):
+
+`.\scripts\_vitis.ps1 -v 2025.2 -s scripts\checkout.py`
+
+`scripts\_vitis.bat -v 2025.2 -s scripts\checkin.py`
+
+`./scripts/_vitis.sh -v 2025.2 -s scripts/checkout.py`
+
+The same Vitis-locating/launching logic, plus process management and
+platform XSA update/upgrade helpers, is available for use from Python
+directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
+`vitisPythonPathEntries`, `runWithVitisPython`, `listVitisProcesses`,
+`stopDanglingVitisProcesses`, and `updatePlatformXsa`.
+
+----
