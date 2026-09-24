@@ -21,8 +21,8 @@ from vitis import (_build, _server)
 from pathlib import Path
 from shutil import copy
 from json import (JSONEncoder, JSONDecoder)
-from re import (compile, RegexFlag)
-from sys import version_info
+from re import (compile, escape, RegexFlag)
+from sys import version_info, exit as sys_exit
 from misc import (LOG, MapCmdLineOpts)
 
 class UtilityWS:
@@ -174,7 +174,7 @@ class UtilityWS:
              it consists of a nested data structure.
         """
         # The separator used is similar to lnx platforms for item.value items.
-        PTRN_EX = compile("../", RegexFlag.IGNORECASE)
+        PTRN_EX = compile(escape("../"), RegexFlag.IGNORECASE)
         # Extract from a protobuff class metadata.
         for item in obj.settings:
             if len(item.value) != UtilityWS.EMPTY_BUFFER:
@@ -182,14 +182,10 @@ class UtilityWS:
                 if len(item.value) == 1:
                     valLoc = item.value.__getitem__(0)
                 else:
-                    # Copy this list to add to self.dConfWs.
-                    valLoc = item.value[:]
-                    iDel = 0
-                    dimValLoc = len(valLoc)
-                    for idx in range(0, dimValLoc):
-                        if PTRN_EX.search(valLoc[idx]) is not None:
-                            iDel += 1
-                    del valLoc[dimValLoc - iDel:]
+                    # Copy this list to add to self.dConfWs, dropping any
+                    # parent-relative ("../") entries wherever they occur
+                    # (not just at the end - entries can be interleaved).
+                    valLoc = [v for v in item.value if PTRN_EX.search(v) is None]
                 self.dConfWs[item.key] = valLoc if type(valLoc) is list else [valLoc]
             else:
                 self.dConfWs[item.key] = []
@@ -808,3 +804,4 @@ if __name__ == "__main__":
     lcWs = Workspace()
     iRet = lcWs.checkInSF()
     LOG("Check in file finished with status: " + str(iRet))
+    sys_exit(iRet)
