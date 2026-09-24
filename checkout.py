@@ -76,16 +76,24 @@ def GetMetadata(**kwargs):
             #  xv_pycommontasks - py extension module (on win)
             #  xv_hsmpytasks - py extension module (on win)
             HwDesign = hsi.HwManager.open_hw_design(xsa)
-            ret_metadata["arch"] = HwDesign.FAMILY
-            for proc in HwDesign.get_cells(hierarchical="true", filter="IP_TYPE==PROCESSOR"):
-                if ((proc.IP_NAME == "psu_cortexa53" or
-                     proc.IP_NAME == "psu_cortexa72" or
-                     proc.IP_NAME == "psu_cortexr5") or
-                    proc.IP_NAME == "ps7_cortexa9"
-                    ):
-                    ret_metadata["target_proc"] = proc.IP_NAME + "_0"
-                    break
-            # HwDesign.close()
+            try:
+                ret_metadata["arch"] = HwDesign.FAMILY
+                for proc in HwDesign.get_cells(hierarchical="true", filter="IP_TYPE==PROCESSOR"):
+                    if ((proc.IP_NAME == "psu_cortexa53" or
+                         proc.IP_NAME == "psu_cortexa72" or
+                         proc.IP_NAME == "psu_cortexr5") or
+                        (proc.IP_NAME == "psv_cortexa72" or
+                         proc.IP_NAME == "psv_cortexr5") or
+                        proc.IP_NAME == "ps7_cortexa9"
+                        ):
+                        ret_metadata["target_proc"] = proc.IP_NAME + "_0"
+                        break
+            finally:
+                # Release the HSI-side hardware design handle whether or
+                # not metadata extraction above succeeded, so a scratch
+                # xsa (see _extractXsaMetadataScratch) is never left open
+                # when its temp dir is removed right after this returns.
+                HwDesign.close()
         else:
             LOG("No XSA file was provided, hardware metadata cannot be extracted!")
     else:
@@ -1090,7 +1098,7 @@ class Workspace:
                         continue
                     remove(dest_entry)
                 elif is_dir:
-                    shutil.rmtree(dest_entry, ignore_errors=True)
+                    shutil.rmtree(dest_entry, onerror=self._forceRemoveReadonly)
                 else:
                     remove(dest_entry)
                 LOG(f"Removed stale file no longer present in the checked-in source: {dest_entry}")
@@ -1154,7 +1162,7 @@ class Workspace:
         for stale_module in previous_extra_modules - valid_extra_modules:
             stale_dir = path.join(app.component_location, "src", stale_module)
             if path.isdir(stale_dir):
-                shutil.rmtree(stale_dir, ignore_errors=True)
+                shutil.rmtree(stale_dir, onerror=self._forceRemoveReadonly)
                 LOG(f"Removed stale extra module directory (renamed/removed at "
                    f"the source since the last run): {stale_dir}")
         self._pruneStaleFiles(
@@ -1396,13 +1404,19 @@ class Workspace:
         @Description
         Build an application component (see quietBuild), transparently
         working around the Vitis 2025.2 CMAKE_*_FLAGS bug (see
-        _fixCmakeFlags) if the first build attempt fails and the fix-up
-        actually changes something, by retrying once; otherwise this was a
-        genuine content/compile error, so the original exception propagates
-        as before. Shared by _buildApplication (fresh component) and
-        _rebuildApplicationInPlace (--incremental, reused component), since
-        an app's own build/CMakeCache.txt only exists once its build has
-        actually started, so it can only be fixed reactively either way.
+        _fixCmakeFlags). The generated cache is inspected/fixed after every
+        first build attempt, not just a failed one - Vitis can seed
+        incorrect flags yet still complete for an application that doesn't
+        happen to exercise them, silently producing a binary built without
+        the intended toolchain flags. Whenever the fix-up actually changes
+        something the build is retried once, regardless of whether the
+        first attempt succeeded or failed; if it changes nothing after a
+        failed first attempt, that was a genuine content/compile error, so
+        the original exception propagates as before. Shared by
+        _buildApplication (fresh component) and _rebuildApplicationInPlace
+        (--incremental, reused component), since an app's own
+        build/CMakeCache.txt only exists once its build has actually
+        started, so it can only be fixed reactively either way.
 
         @Parameters
         app: application component obj (already configured/populated).
@@ -1410,15 +1424,26 @@ class Workspace:
         desc_suffix: appended to the log description, e.g. " (incremental)".
         """
         desc = f"application \"{app_name}\"{desc_suffix}"
+        build_error = None
         try:
             self.quietBuild(app.build, desc)
-        except Exception:
-            cache_path = app.component_location + sep + "build" + sep + "CMakeCache.txt"
-            if path.isfile(cache_path) and self._fixCmakeFlags(cache_path, desc):
-                LOG(f"Retrying {desc} build after the CMAKE_*_FLAGS fix-up...")
-                self.quietBuild(app.build, f"{desc} (retry)")
-            else:
-                raise
+        except Exception as e:
+            build_error = e
+
+        # Inspect/fix the cache after every initial build, not just a
+        # failed one: Vitis can seed incorrect CMAKE_*_FLAGS yet still
+        # complete successfully for an application that happens not to
+        # exercise the missing flags, silently accepting a binary built
+        # without the intended toolchain flags. If the fix-up changed
+        # anything, the build (successful or not) must be retried; if it
+        # didn't and the first build had failed, that was a genuine
+        # content/compile error, so the original exception propagates.
+        cache_path = app.component_location + sep + "build" + sep + "CMakeCache.txt"
+        if path.isfile(cache_path) and self._fixCmakeFlags(cache_path, desc):
+            LOG(f"Retrying {desc} build after the CMAKE_*_FLAGS fix-up...")
+            self.quietBuild(app.build, f"{desc} (retry)")
+        elif build_error is not None:
+            raise build_error
 
     def _removeTemplateCruft(self, app) -> None:
         """
@@ -1573,9 +1598,12 @@ class Workspace:
                     LOG(f"Unknown --app value(s) {sorted(unknown_apps)}: "
                        f"no such application among {sorted(app_names)}.")
                     return Workspace.FAILURE
-                platforms, apps = self._resolveSelectiveTargets(
+                resolved = self._resolveSelectiveTargets(
                     platforms, apps, app_names, hw_platforms, repo_root
                     )
+                if resolved is None:
+                    return Workspace.FAILURE
+                platforms, apps = resolved
                 existing = {c["name"] for c in client.list_components()}
             else:
                 existing = set()
@@ -1659,7 +1687,7 @@ class Workspace:
                 bound.add(plt["name"])
         return bound
 
-    def _resolveSelectiveTargets(self, platforms, apps, app_names, hw_platforms, repo_root) -> tuple:
+    def _resolveSelectiveTargets(self, platforms, apps, app_names, hw_platforms, repo_root):
         """
         @Description
         Expand an explicit --platform/--app selective-rebuild request into
@@ -1680,7 +1708,12 @@ class Workspace:
         repo_root: absolute path to the parent repository (parent of `src`).
 
         @Returns
-        (platforms, apps) tuple of the expanded sets.
+        (platforms, apps) tuple of the expanded sets, or None if an
+        explicitly-requested app's platform/xsa correlation could not be
+        resolved (checkOutSF must fail before mutating any component in
+        that case: continuing would delete the existing app - since it's
+        still a selective rebuild target - without anything to rebuild it
+        with, yet still return success).
         """
         platforms = set(platforms)
         apps = set(apps)
@@ -1690,8 +1723,11 @@ class Workspace:
             comp_settings_path = (repo_root + sep + "src" + sep + app_name +
                                   sep + Workspace.COMP_SETTINGS)
             plt = self._resolveAppPlatform(app_name, comp_settings_path, hw_platforms, repo_root)
-            if plt:
-                platforms.add(plt["name"])
+            if plt is None:
+                LOG(f"Cannot selectively rebuild application \"{app_name}\": its "
+                   f"platform/xsa correlation could not be resolved (see above).")
+                return None
+            platforms.add(plt["name"])
 
         if not apps_explicitly_requested:
             for app_name in app_names:
