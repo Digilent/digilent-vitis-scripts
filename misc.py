@@ -480,7 +480,14 @@ def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> li
                 try:
                     from datetime import datetime
                     createdEpoch = datetime.strptime(parts[2].strip(), "%a %b %d %H:%M:%S %Y").timestamp()
-                    if createdEpoch >= startedBefore:
+                    # "ps ... lstart" only has whole-second resolution, while
+                    # startedBefore comes from a fractional time.time(); a
+                    # process started later in the same second as
+                    # startedBefore would otherwise floor-round below the
+                    # cutoff and be mistaken for an older, dangling one. A
+                    # 1s tolerance keeps the just-started current server out
+                    # of the "dangling" list.
+                    if createdEpoch >= startedBefore - 1:
                         continue
                 except ValueError:
                     pass
