@@ -105,9 +105,12 @@ if "%STOP_DANGLING%"=="1" (
     rem process name (including the otherwise-unambiguous "vitis.exe"/
     rem "vitis-server.exe") is scoped to it - never touches a different
     rem Vitis install's processes, or an unrelated Java/Eclipse-based
-    rem program left running on the machine.
+    rem program left running on the machine. A trailing separator is
+    rem appended to VITIS_ROOT before the prefix check (with an exact-match
+    rem fallback) so a sibling install like "...\Vitis-old\java.exe" can
+    rem never match root "...\Vitis" as a mere string prefix.
     powershell -NoProfile -NonInteractive -Command ^
-        "Get-CimInstance Win32_Process | Where-Object { ('vitis.exe','vitis-server.exe','eclipse.exe','java.exe') -contains $_.Name -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith('%VITIS_ROOT%'.ToLower()) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        "Get-CimInstance Win32_Process | Where-Object { ('vitis.exe','vitis-server.exe','eclipse.exe','java.exe') -contains $_.Name -and $_.ExecutablePath -and ($_.ExecutablePath.Equals('%VITIS_ROOT%', [System.StringComparison]::OrdinalIgnoreCase) -or $_.ExecutablePath.StartsWith('%VITIS_ROOT%\', [System.StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 )
 
 set "VITIS_PYTHON="

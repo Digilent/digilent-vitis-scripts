@@ -54,6 +54,17 @@ function Get-LayoutCandidates([string]$RootBase, [string]$Ver) {
     )
 }
 
+function Test-PathUnderRoot([string]$Candidate, [string]$Root) {
+    # Boundary-aware, case-insensitive "is Candidate under Root" check: a
+    # plain StartsWith on the raw strings would let a sibling install like
+    # "C:\AMD\Vitis-old\java.exe" match root "C:\AMD\Vitis", since that root
+    # is itself just a string prefix of the sibling's path.
+    if (-not $Candidate -or -not $Root) { return $false }
+    $normalizedRoot = $Root.TrimEnd('\')
+    return ($Candidate.Equals($normalizedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $Candidate.StartsWith($normalizedRoot + '\', [System.StringComparison]::OrdinalIgnoreCase))
+}
+
 function Find-VitisRoot([string]$Ver, [string]$Configured) {
     $candidates = @()
     if ($Configured) {
@@ -116,7 +127,7 @@ function Stop-DanglingVitisProcesses([string]$VitisRoot) {
             # "vitis-server") is scoped to it - never touches a different
             # Vitis install's processes, or an unrelated Java/Eclipse-based
             # program left running on the machine.
-            if (-not $VitisRoot -or -not $p.Path -or -not $p.Path.ToLower().StartsWith($VitisRoot.ToLower())) {
+            if (-not $VitisRoot -or -not $p.Path -or -not (Test-PathUnderRoot $p.Path $VitisRoot)) {
                 continue
             }
             try {
