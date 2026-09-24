@@ -37,49 +37,50 @@ for development of `projects`.
 ## Quick Checkout Guide
 
 1. Some Digilent Github repositories also require that you check out a specific demo branch.
-Whenever checking out a demo branch, submodules should be updated and initialized:
+   Whenever checking out a demo branch, submodules should be updated and initialized:
 
-`git submodule update --init [--recursive]`
+   `git submodule update --init [--recursive]`
 
 2. Close Vitis Unified IDE, if you have it open.
 
 3. If you ran the `checkout.py` script before for the same project, please make sure you
-delete the `ws` folder from `sw`.
+   delete the `ws` folder from `sw`.
 
 4. The scripts present in this repository can be run through the use of the
-Vitis Commandline Tool 202x.y, which comes along with Vitis.
-To recreate the workspace, enter the following command into the Vitis Commandline Tool,
-specifying the absolute path to the checkout script:
+   Vitis Commandline Tool 202x.y, which comes along with Vitis.
+   To recreate the workspace, enter the following command into the Vitis Commandline Tool,
+   specifying the absolute path to the checkout script:
 
-`run <path-to-scripts-repo>checkout.py`
+   `run <path-to-scripts-repo>checkout.py`
 
-This process will populate the workspace with projects containing sources
-from the parent repository's `src` folder, configure those projects, and fully build them.
-This may take several minutes to fully complete. When the script is finished running,
-the "Build Finished successfully" message will appear in the command line, followed by the
-`Vitis [idx]:` prompt, where `idx - 1` is the number of inserted commands.
+   This process will populate the workspace with projects containing sources
+   from the parent repository's `src` folder, configure those projects, and fully build them.
+   This may take several minutes to fully complete. When the script is finished running,
+   the "Build Finished successfully" message will appear in the command line, followed by the
+   `Vitis [idx]:` prompt, where `idx - 1` is the number of inserted commands.
 
-The above functionality can be reproduced from Vitis Unified IDE launching the terminal
-from Terminal -> New Terminal which uses the default command line executable from the OS.
-If this is the choosen method, then it will be necessary to give absolute path to the
-`checkout.py` file, not relative:
+   The above functionality can be reproduced from Vitis Unified IDE launching the terminal
+   from Terminal -> New Terminal which uses the default command line executable from the OS.
+   If this is the choosen method, then it will be necessary to give absolute path to the
+   `checkout.py` file, not relative:
 
-`vitis -s <path-to-scripts-repo>checkout.py`
+   `vitis -s <path-to-scripts-repo>checkout.py`
 
-Alternatively, you can change the Vitis Unified IDE current working directory to the
-branch's `sw` submodule and then specify the path to the checkout script as
-`scripts\checkout.py`.
+   Alternatively, you can change the Vitis Unified IDE current working directory to the
+   branch's `sw` submodule and then specify the path to the checkout script as
+   `scripts\checkout.py`.
 
-**Note:**
-*The current working directory is irrelevant to the functionality of the scripts in this submodule.*
+   **Note:**
+   *The current working directory is irrelevant to the functionality of the scripts in this submodule.*
 
 5. Close the Vitis Commandline Tool/Vitis Unified IDE window which you used to recreate
-the workspace.
+   the workspace.
 
 6. Open Vitis Unified IDE either through Vivado's *Tools* menu, either on its own, and
-set the Vitis workspace to the repository's `sw` -> `ws` folder.
-From this point, the demo can be programmed onto a board, sources can be viewed and
-modified as desired.
+   set the Vitis workspace to the repository's `sw` -> `ws` folder.
+   From this point, the demo can be programmed onto a board, sources can be viewed and
+   modified as desired.
+
 ----
 
 ## Quick Checkin Guide
@@ -97,27 +98,27 @@ modified as desired.
 1. Close Vitis Unified IDE, if you have it open.
 
 2. The scripts presented in this repository can be run through the use of the
-Vitis Commandline Tool 202x.y, for example 2025.1, which comes along with Vitis.
-To backup the workspace, enter the following command into the Vitis Console, giving it the
-absolute path to the checkin script:
+   Vitis Commandline Tool 202x.y, for example 2025.1, which comes along with Vitis.
+   To backup the workspace, enter the following command into the Vitis Console, giving it the
+   absolute path to the checkin script:
 
-`run <path-to-scripts-repo>checkin.py`
+   `run <path-to-scripts-repo>checkin.py`
 
-The above functionality can be reproduced from Vitis Unified IDE by launching the terminal from
-Terminal -> New Terminal which uses the default command line executable from the OS. If
-this is the choosen method, then it will be necessary to give absolute path to the `checkin.py`
-file, not relative:
+   The above functionality can be reproduced from Vitis Unified IDE by launching the terminal from
+   Terminal -> New Terminal which uses the default command line executable from the OS. If
+   this is the choosen method, then it will be necessary to give absolute path to the `checkin.py`
+   file, not relative:
 
-`vitis -s <path-to-scripts-repo>checkin.py`
+   `vitis -s <path-to-scripts-repo>checkin.py`
 
-Alternatively, you can change the Vitis Unified IDE current working directory to the
-branch's `sw` submodule and then specify the path to the checkin script as
-`scripts\checkin.py`.
+   Alternatively, you can change the Vitis Unified IDE current working directory to the
+   branch's `sw` submodule and then specify the path to the checkin script as
+   `scripts\checkin.py`.
 
 3. Close the Vitis Commandline Tool/Vitis Unified IDE window which you used to run the
-checkin script.
-You can now use the `Git` bash to check what files under the `src` folder have been changed
-and what you would need to commit to `Git`.
+   checkin script.
+   You can now use the `Git` bash to check what files under the `src` folder have been changed
+   and what you would need to commit to `Git`.
 
 ----
 
