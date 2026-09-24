@@ -277,8 +277,8 @@ class Workspace:
         Read the platform/xsa correlation entry checkin.py stores alongside
         the "USER_*" settings in comp-settings.json (the one key that is not
         "USER_*"-prefixed), so an application always gets rebuilt against the
-        exact XSA variant it was checked in against (e.g. tac5142 vs
-        tac5112), instead of an arbitrary/first-found platform. The entry's
+        exact XSA variant it was checked in against (e.g. one hw variant vs
+        another), instead of an arbitrary/first-found platform. The entry's
         value is either a bare xsa path string (older check-ins, before the
         processor/domain association below was tracked) or a dict with an
         "xsa" key (see getAppTargetProc); both are accepted here.
@@ -289,7 +289,7 @@ class Workspace:
 
         @Returns
         Relative xsa path as stored in the json (e.g.
-        "src\\3eg_audio_hw_pf\\system_wrapper_tac5142.xsa"), or "" if none or
+        "src\\my_platform_hw_pf\\my_platform.xsa"), or "" if none or
         more than one candidate key is found.
         """
         dJsonStruct = JSONDecoder().decode(open(filepath).read())
@@ -655,8 +655,8 @@ class Workspace:
         "src" subdir) and every XSA file, then group XSA files by their
         containing "*_hw_pf" folder to derive one platform per XSA (not one
         per folder), so multiple HW variants sharing a folder (e.g.
-        tac5142/tac5112) each get their own platform: named after the xsa's
-        own stem (e.g. "system_wrapper_tac5112"), only prefixed with the
+        variant_a/variant_b) each get their own platform: named after the xsa's
+        own stem (e.g. "my_platform_variant_a"), only prefixed with the
         hw_pf folder name in the rare case two different folders have xsa's
         sharing the same stem.
 
@@ -700,7 +700,7 @@ class Workspace:
         for hw_pf_dir, xsas_in_dir in xsa_by_dir.items():
             for xsa_path in xsas_in_dir:
                 # Platform name is just the xsa's own stem (e.g.
-                # "system_wrapper_tac5112"), not the containing hw_pf
+                # "my_platform_variant_a"), not the containing hw_pf
                 # folder, so it stays meaningful even when a folder is
                 # renamed/shared. Only disambiguate with the hw_pf folder
                 # name in the rare case two different folders have xsa's
@@ -1263,7 +1263,7 @@ class Workspace:
         """
         @Description
         Record the platform's original "src" folder name (e.g.
-        "3eg_audio_hw_pf") into a small manifest file inside the platform's
+        "my_platform_hw_pf") into a small manifest file inside the platform's
         own workspace component dir, so checkin.py can check the xsa back
         into that same folder even when the workspace platform component
         name differs from it (see _discoverAppsAndPlatforms: the component
@@ -1503,7 +1503,7 @@ class Workspace:
         @Description
         Import any extra module directory checked in alongside an
         application's own "src" folder under `src/<app_name>/` (e.g. a
-        small shared driver module like "tac5x1x_tac5142", a sibling of
+        small shared driver module like "my_shared_module", a sibling of
         "src" rather than nested inside it) into the SAME-named
         subdirectory under the component's own "src", matching where this
         repo's comp-settings.json's USER_COMPILE_SOURCES/
@@ -1674,13 +1674,13 @@ class Workspace:
         narrows that down explicitly), and requesting an application also
         (re)builds the platform it resolves to, if not already targeted.
         Every other already-built component is left completely untouched -
-        e.g. `--platform system_wrapper_tac5112` updates that one platform
+        e.g. `--platform my_platform_variant_a` updates that one platform
         and whatever application uses it, without rebuilding
-        system_wrapper/system_wrapper_tac5142 or re-wiping the workspace.
+        my_platform/my_platform_variant_b or re-wiping the workspace.
 
         @Parameters
         platforms: platform names (as derived in _discoverAppsAndPlatforms,
-                  e.g. "system_wrapper_tac5112") to selectively rebuild, or
+                  e.g. "my_platform_variant_a") to selectively rebuild, or
                   None/empty for a full checkout.
         apps: application folder names under `src` to selectively rebuild,
              or None/empty for a full checkout.
@@ -1946,9 +1946,9 @@ if __name__ == "__main__":
     for a quick source-edit-and-rebuild cycle. Examples (through
     _vitis.bat/.ps1/.sh, which forward any extra args here):
         _vitis.bat -v 2025.2 -s .\\checkout.py
-        _vitis.bat -v 2025.2 -s .\\checkout.py --platform system_wrapper_tac5112
-        _vitis.bat -v 2025.2 -s .\\checkout.py --app validation
-        _vitis.bat -v 2025.2 -s .\\checkout.py --app validation --incremental
+        _vitis.bat -v 2025.2 -s .\\checkout.py --platform my_platform
+        _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app
+        _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app --incremental
         _vitis.bat -v 2025.2 -s .\\checkout.py --skip-unbound-platforms
     """
     parser = argparse.ArgumentParser(
@@ -1956,7 +1956,7 @@ if __name__ == "__main__":
         )
     parser.add_argument(
         "--platform", action="append", default=[], metavar="NAME",
-        help="Only rebuild this platform (e.g. system_wrapper_tac5112), plus any "
+        help="Only rebuild this platform (e.g. my_platform), plus any "
             "application bound to it, instead of wiping/rebuilding the whole "
             "workspace. May be repeated. Default: rebuild everything."
         )
