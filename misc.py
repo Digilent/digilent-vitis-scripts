@@ -570,7 +570,7 @@ def updatePlatformXsa(platformComp, xsaPath : str) -> bool:
     @Description
     Thin wrapper around vitis-py's platform_component.update_hw, to swap the
     hardware specification (.xsa) an existing platform/app is built against,
-    e.g. moving a tac5142 app onto a freshly rebuilt tac5112 *_hw_pf xsa
+    e.g. moving an app onto a freshly rebuilt hw-variant's *_hw_pf xsa
     without recreating the whole workspace.
 
     @Parameters
