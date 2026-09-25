@@ -431,6 +431,13 @@ class SrcFilesWS:
             # application count/loop above, since a workspace can contain
             # more platforms than applications (e.g. an intentionally
             # unbound platform kept via --skip-unbound-platforms).
+            # Multiple platforms can share one destination "src" dir
+            # (valid XSA variants); precompute the still-current basenames
+            # per dir so stale-cleanup below never deletes a variant.
+            validXsaByDestDir = {}
+            for pltIdx in range(0, dimLsArchFl):
+                validXsaByDestDir.setdefault(self.lsArchSrcDir[pltIdx], set()).add(
+                    path.basename(self.lsArchFl[pltIdx]))
             for pltIdx in range(0, dimLsArchFl):
                 # Destination dir preserves the original checked-in "src"
                 # folder name across renames of the workspace platform
@@ -441,16 +448,14 @@ class SrcFilesWS:
                 if path.isdir(destPltDir) is not True:
                     mkdir(destPltDir)
                 else:
-                    # Remove any previously checked-in XSA(s) for this
-                    # platform dir before copying the current one: if the
-                    # export was renamed since the last check-in, the old
-                    # file would otherwise remain alongside the new one,
-                    # and checkout discovers every ".xsa" it finds, turning
-                    # the stale leftover into a bogus extra platform.
-                    newXsaName = path.basename(self.lsArchFl[pltIdx])
+                    # Remove checked-in XSA(s) no longer current for this
+                    # dir (e.g. renamed export), skipping any name still
+                    # valid for another platform sharing this dir, so
+                    # variants aren't deleted by each other's pass.
+                    validNames = validXsaByDestDir[destPltDir]
                     for existing in listdir(destPltDir):
                         if (existing.lower().endswith(".xsa")
-                                and existing != newXsaName):
+                                and existing not in validNames):
                             stalePath = path.join(destPltDir, existing)
                             remove(stalePath)
                             LOG(f"Removed stale checked-in XSA: {stalePath}")
