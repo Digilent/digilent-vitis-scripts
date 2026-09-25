@@ -174,7 +174,12 @@ if ($Script) {
         Write-Error "Could not locate the python interpreter bundled with Vitis $Version."
         exit 1
     }
-    $env:PYTHONPATH = (Get-VitisPythonPathEntries -VitisRoot $vitisRoot) -join ";"
+    # Append (not replace) any PYTHONPATH the caller already had set, same
+    # as _vitis.sh/runWithVitisPython, so scripts depending on caller-
+    # provided Python modules still work through this launcher.
+    $vitisPythonPathEntries = @(Get-VitisPythonPathEntries -VitisRoot $vitisRoot)
+    if ($env:PYTHONPATH) { $vitisPythonPathEntries += $env:PYTHONPATH }
+    $env:PYTHONPATH = $vitisPythonPathEntries -join ";"
     # create_client()'s startServer falls back to a stale dev-build layout
     # ("rigel-server/build/install/...") when XILINX_VITIS is unset, which
     # does not exist in a real install; setting it (scoped to this process
