@@ -1931,8 +1931,8 @@ class Workspace:
         dispose()
 
         LOG("Checking out Vitis project into the workspace...")
-        client = create_client()
         try:
+            client = create_client()
             if selective:
                 self._openExistingWorkspace(client, ws_path)
             else:
