@@ -1,61 +1,255 @@
+
 # digilent-vitis-scripts
-This repository contains a set of scripts for managing Vitis workspaces with git. 
 
-----
-## Quick Checkout Guide
+This is a repo for the new Vitis Unified IDE; it contains solutions for check in/out workflow.
+The checkin/out scripts will handle all the necessary tasks to ensure a smooth workflow
+for development of `projects`.
 
-When cloning this repository, use the command `git clone --recursive <URL>` to pick up any submodules this repository may use to bring in additional source files. Alternatively initialize and update the repository's submodules after cloning (`git submodule update --init` within the repo directory).
-
-Some Digilent Github repositories also require that you check out a specific demo branch. Whenever checking out a demo branch, submodules should be reupdated and reinitialized (`git submodule update --init`, as above).
-
-When launching Vitis, whether through Vivado's *Tools* menu, or on its own, the Vitis workspace should be set to the repository's sw/ws folder.
-
-The scripts present in this repository can be run through the use of the Xilinx Software Command-Line Tool (XSCT), which is built into Vitis. This tool can be opened within the Vitis GUI through the *Xilinx > XSCT Console* option in the menu bar at the top of the window. Upon launch, XSCT's current working directory is set to the Vitis install directory. To recreate the workspace, enter the following command into the XSCT Console:
-
-`source [getws]/../src/checkout.tcl`
-
-This process will populate the workspace with projects containing sources from the parent repository's src folder, configure those projects, and fully build them. This may take several minutes to fully complete. When the script is finished running, the `xsct%` prompt wil reappear in the tan XSCT Process pane. From this point, the demo can be programmed onto a board, sources can be viewed, and modified, as desired.
-
-**Note:** *The current working directory is irrelevant to the functionality of the scripts in this submodule.*
-
-----
-## Quick Checkin Guide
-
-**Important:** *The checkin.tcl script should generally only be used for the first time checking a project into version control. For further commits, new files should be manually copied into the repository's src directory. Application source files (and linker scripts) are soft-linked into the workspace upon checkout, so existing files do not need to be manually copied back. Modifications to project settings require that the corresponding scripts in the repository's src directory be edited.*
-
-This section assumes that you have already created a Vitis workspace containing one or more application projects. Some additional work may be required after the checkin script is completed, and it is important that you try the checkout process afterwards to ensure that all important settings are properly included.
-
-The checkin script has only been tested with standalone application projects at time of writing.
-
-To add this repository to a parent repository as a submodule, first open a terminal with access to git. If your parent repository does not yet have a `sw` subdirectory (or submodule), create one and cd into it. Adding the `scripts` path argument to the command is recommended in order to keep file paths short.
+**Note #1:**
+*To add this repository to a parent repository as a submodule, first open a terminal*
+*with access to `git`. Adding the `scripts` path argument to the command is recommended*
+*in order to keep file paths short.*
 
 `git submodule add https://github.com/Digilent/digilent-vitis-scripts scripts`
 
-Open your workspace in Vitis. Open the XSCT Console from within the Vitis GUI by selecting the *Xilinx > XSCT Console* option in the menu bar at the top of the window. To copy all relevant (local only!) source files into the parent repository's src directory and create the scripts used by checkout.tcl, run the following command:
+`git -C scripts checkout new_vitis/master`
 
-`source <path to digilent-vitis-scripts>/checkin.tcl`
+**Note #2:**
+*The checkout/checkin scripts need to have `src` directory in the same folder as the*
+*scripts submodule, populating it as below:*
 
-This script will create a src directory in the same folder as the scripts submodule, and populate it as below:
-
-* checkout.tcl script and README file
-* One folder per application project, containing the following:
-  * A src directory, containing the application project's local sources (from its src folder) and linker script.
-  * A #_standalone_app.tcl script, containing the XSCT commands required to recreate and configure the project.
-  * A #_build_app.tcl script, containing the XSCT commands required to build the project.
-* One folder per (non-automatically generated) domain, containing the following:
-  * A #_standalone_bsp.tcl script containing the XSCT commands to recreate and configure the domain.
-* One folder per hardware platform, containing the following:
-  * A #_hw_pf_xsa.tcl script, containing the XSCT commands required to recreate and configure the platform, using only the XSA as input.
+* One folder per hardware platform
   * The XSA file describing the hardware specification that the software targets, exported from Vivado.
+* One folder per application project, containing the following:
+  * A comp-settings.json file with user settings and relative path to XSA file used by a project.
+  * A src directory with source files and cmake, linker scripts.
 
-Additionally, a gitignore file is created in the parent repository's sw directory.
+*Note that the name of each folder is used in `checkout` to determine the name of the app/platform/domain.*
 
-Note that the name of each folder is used in checkout to determine the name of the app/platform/domain it is used to create.
+**Note #3:**
+*The `ws` workspace folder generated by `checkout.py` is a sibling of the `src`/`scripts`*
+*folders, one level above `scripts`, so this repository's own `.gitignore` cannot exclude*
+*it from the parent repository. `checkout.py` automatically adds (once, if not already*
+*present) an ignore rule for it to that parent repository's top-level `.gitignore` the*
+*first time it (re)creates `ws`, keeping the generated workspace's build artifacts out of*
+*`git status` while still tracking the checked-in `cleanup.cmd`/`cleanup.sh`/`.keep` placeholders.*
 
-The numeric prefixes for XSCT scripts are used to determine the order in which they are sourced during checkout (lowest to highest). Recommended: 0-9 for hardware platform, 20-29 for bsp, 40-49 for app creation. Build scripts are recommended to use > 100.
+**Special Note:**
+*Vitis Unified IDE creates a `.lock` file which after the IDE is closed or another*
+*Vitis TCP/IP server is stopped, it will have its file descriptor still*
+*hooked up to the previous process. Therefore, between consecutive*
+*`checkout.py` runs/`checkin.py` runs/Vitis Unified IDE closing leave at least a few seconds.*
 
-As mentioned above, you MUST test the checkout process and check the generated scripts to ensure that all sources, project settings, and build configuration settings are correctly applied to the projects when someone else checks them out.
+----
 
-The checkin script is *not* perfect, and manual intervention is likely to be required after the script is run. Edit the automatically generated scripts as needed, and double check your source files.
+## Quick Checkout Guide
+
+1. Some Digilent Github repositories also require that you check out a specific demo branch.
+   Whenever checking out a demo branch, submodules should be updated and initialized:
+
+   `git submodule update --init [--recursive]`
+
+2. Close Vitis Unified IDE, if you have it open.
+
+3. If you ran the `checkout.py` script before for the same project, please make sure you
+   delete the `ws` folder from `sw`.
+
+4. The scripts present in this repository can be run through the use of the
+   Vitis Commandline Tool 202x.y, which comes along with Vitis.
+   To recreate the workspace, enter the following command into the Vitis Commandline Tool,
+   specifying the absolute path to the checkout script:
+
+   `run <path-to-scripts-repo>\checkout.py`
+
+   This process will populate the workspace with projects containing sources
+   from the parent repository's `src` folder, configure those projects, and fully build them.
+   This may take several minutes to fully complete. When the script is finished running,
+   the "Build Finished successfully" message will appear in the command line, followed by the
+   `Vitis [idx]:` prompt, where `idx - 1` is the number of inserted commands.
+
+   The above functionality can be reproduced from Vitis Unified IDE launching the terminal
+   from Terminal -> New Terminal which uses the default command line executable from the OS.
+   If this is the chosen method, then it will be necessary to give absolute path to the
+   `checkout.py` file, not relative:
+
+   `vitis -s <path-to-scripts-repo>\checkout.py`
+
+   Alternatively, you can change the Vitis Unified IDE current working directory to the
+   branch's `sw` submodule and then specify the path to the checkout script as
+   `scripts\checkout.py`.
+
+   **Note:**
+   *The current working directory is irrelevant to the functionality of the scripts in this submodule.*
+
+5. Close the Vitis Commandline Tool/Vitis Unified IDE window which you used to recreate
+   the workspace.
+
+6. Open Vitis Unified IDE either through Vivado's *Tools* menu, either on its own, and
+   set the Vitis workspace to the repository's `sw` -> `ws` folder.
+   From this point, the demo can be programmed onto a board, sources can be viewed and
+   modified as desired.
+
+----
+
+## Quick Checkin Guide
+
+**Important:** *The `checkin.py` can be used multiple times, it will overwrite the existent*
+*files and if some new ones appear into an application they are going to be copied too.*
+
+**Note:**
+*This section assumes that you have already created a Vitis workspace containing*
+*one or more application projects.*
+
+**Note:**
+*The checkin script has only been tested with standalone application projects at time of writing.*
+
+1. Close Vitis Unified IDE, if you have it open.
+
+2. The scripts presented in this repository can be run through the use of the
+   Vitis Commandline Tool 202x.y, for example 2025.1, which comes along with Vitis.
+   To backup the workspace, enter the following command into the Vitis Console, giving it the
+   absolute path to the checkin script:
+
+   `run <path-to-scripts-repo>\checkin.py`
+
+   The above functionality can be reproduced from Vitis Unified IDE by launching the terminal from
+   Terminal -> New Terminal which uses the default command line executable from the OS. If
+   this is the chosen method, then it will be necessary to give absolute path to the `checkin.py`
+   file, not relative:
+
+   `vitis -s <path-to-scripts-repo>\checkin.py`
+
+   Alternatively, you can change the Vitis Unified IDE current working directory to the
+   branch's `sw` submodule and then specify the path to the checkin script as
+   `scripts\checkin.py`.
+
+3. Close the Vitis Commandline Tool/Vitis Unified IDE window which you used to run the
+   checkin script.
+   You can now use the `Git` bash to check what files under the `src` folder have been changed
+   and what you would need to commit to `Git`.
+
+----
+
+## Running Scripts Without Vitis Environment Variables
+
+`_vitis.ps1` / `_vitis.bat` / `_vitis.sh` are OS-native launchers that mimic
+`vitis -s <script>` without requiring Vitis to be on the `PATH` or any Vitis
+environment variables to be set. They locate a Vitis install on disk (trying
+both the legacy `Xilinx` and the post-2025.1 `AMDDesignTools` root folder
+names, on all Windows drives or under `/opt`, `/tools`, `$HOME` on Linux),
+then invoke the bundled Python interpreter directly with the `PYTHONPATH`
+needed to `import vitis`. They can be run from any directory: the `-Script`
+argument is resolved relative to the launcher's own location if it is not
+already an absolute/rooted path, so calling them from the repository root,
+from `sw`, or from anywhere else works the same way.
+
+`-Version`/`-v` selects which installed Vitis version to use (e.g. `2025.2`).
+`-InstallPath`/`-i` can be given to search a specific install root first,
+useful when multiple versions/vendors are installed side-by-side.
+`-Script`/`-s` is the script to run; if omitted, only the Vitis
+install/python/PYTHONPATH info is printed (no script runs) - useful to
+sanity-check what a given `-v`/`-i` resolves to. The long `-Version`/
+`-InstallPath`/`-Script` names are PowerShell-only (`_vitis.ps1`);
+`_vitis.bat`/`_vitis.sh` only parse the short `-v`/`-i`/`-s` forms. Any
+remaining arguments are forwarded to the script. `--stop-dangling` looks
+for leftover Vitis processes (e.g. a `.lock` file's server left running
+after the IDE was closed, see **Special Note** above) and stops them
+before proceeding - scoped to processes actually launched from the
+resolved Vitis install (an unrelated `java`/`eclipse` process elsewhere
+on the machine is left alone).
+
+Examples (run from any directory):
+
+`.\scripts\_vitis.ps1 -v 2025.2 -s checkout.py`
+
+`scripts\_vitis.bat -v 2025.2 -s checkin.py`
+
+`./scripts/_vitis.sh -v 2025.2 -s checkout.py`
+
+The same Vitis-locating/launching logic, plus process management and
+platform XSA update/upgrade helpers, is available for use from Python
+directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
+`vitisPythonPathEntries`, `runWithVitisPython`, `listVitisProcesses`,
+`stopDanglingVitisProcesses`, and `updatePlatformXsa`.
+
+----
+
+## Command Reference (copy/paste, replace placeholders as needed)
+
+`checkout.py` flags (combinable): `--platform <platform-name>` (repeatable),
+`--app <app-name>` (repeatable), `--skip-unbound-platforms`, `--incremental`
+(only meaningful together with `--platform`/`--app`), `--allow-process-cleanup`,
+`-y`/`--assume-yes` (skip the confirmation prompt before a full checkout wipes
+a non-empty workspace; use for unattended/CI runs), `--esw-repo <path>`
+(optional; overrides the embeddedsw copy bundled with Vitis, used for zynqmp
+platforms' FSBL build - omit it to use that bundled copy).
+`checkin.py` flags (combinable): `--port <port-number>` (attach to/start the
+Vitis server on this port; blank/omitted auto-selects one), `--ip
+<ip-address>` (attach to/start the server on this host; defaults to
+localhost). Replace `<version>` with the installed Vitis
+version (e.g. `2025.2`) and `<install-path>` with a specific install root to
+search first. `-Script`/`-s` is always resolved relative to the launcher's
+own directory, so it takes a bare `checkout.py`/`checkin.py`, never prefixed
+with `scripts\`/`scripts/` again.
+
+Windows (`_vitis.bat`), run from the repository root:
+
+```bat
+:: full wipe + rebuild of every platform/app
+.\scripts\_vitis.bat -v <version> -s checkout.py
+
+:: rebuild only this platform (+ any app bound to it)
+.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name>
+
+:: rebuild only this app (+ its resolved platform)
+.\scripts\_vitis.bat -v <version> -s checkout.py --app <app-name>
+
+:: rebuild only this explicit platform+app pair
+.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --app <app-name>
+
+:: rebuild this app in place (re-sync + incremental cmake build, no delete/recreate)
+.\scripts\_vitis.bat -v <version> -s checkout.py --app <app-name> --incremental
+
+:: full run, but skip platforms not referenced by any app's comp-settings.json
+.\scripts\_vitis.bat -v <version> -s checkout.py --skip-unbound-platforms
+
+:: rebuild only this platform, still skipping other unbound platforms
+.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --skip-unbound-platforms
+
+:: back up the current workspace's sources into src\
+.\scripts\_vitis.bat -v <version> -s checkin.py
+
+:: only stop leftover Vitis-install-scoped processes (no script run)
+.\scripts\_vitis.bat -v <version> --stop-dangling
+
+:: search a specific install root first, then run checkout.py
+.\scripts\_vitis.bat -v <version> -i <install-path> -s checkout.py
+```
+
+Windows (`_vitis.ps1`), run from the repository root:
+
+```powershell
+# full wipe + rebuild of every platform/app
+.\scripts\_vitis.ps1 -v <version> -s checkout.py
+
+# rebuild only this platform in place (incremental)
+.\scripts\_vitis.ps1 -v <version> -s checkout.py --platform <platform-name> --incremental
+
+# only stop leftover Vitis-install-scoped processes (no script run)
+.\scripts\_vitis.ps1 -v <version> -StopDangling
+```
+
+Linux (`_vitis.sh`), run from the repository root:
+
+```bash
+# full wipe + rebuild of every platform/app
+./scripts/_vitis.sh -v <version> -s checkout.py
+
+# rebuild only this app in place (incremental)
+./scripts/_vitis.sh -v <version> -s checkout.py --app <app-name> --incremental
+
+# only stop leftover Vitis-install-scoped processes (no script run)
+./scripts/_vitis.sh -v <version> --stop-dangling
+```
 
 ----
