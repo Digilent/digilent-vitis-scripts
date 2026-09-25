@@ -16,7 +16,7 @@
 from os import (chdir, getcwd, listdir,
                 path, sep, makedirs, mkdir,
                 access, chmod, R_OK, W_OK,
-                walk, remove)
+                walk, remove, stat)
 from stat import (S_IWUSR, S_IRUSR)
 from vitis import (_build, _server)
 from pathlib import Path
@@ -417,8 +417,9 @@ class SrcFilesWS:
                 # In py <= 3.8, certain modes for mkdir does not exist, so default one is used.
                 if path.isdir(dTempLoc) is not True:
                     makedirs(dTempLoc)
-                # Impose read and write access for current files.
-                chmod(self.lsBldFl[itemIdx], S_IRUSR | S_IWUSR)
+                # Add owner read/write without dropping any existing
+                # exec/group/other bits (copy() propagates this mode).
+                chmod(self.lsBldFl[itemIdx], stat(self.lsBldFl[itemIdx]).st_mode | S_IRUSR | S_IWUSR)
                 # Check for write protected file in self.lsBldFl.
                 if access(self.lsBldFl[itemIdx], R_OK | W_OK):
                     # Should we use copy2 to preserve metadata instead of copy ?
@@ -459,8 +460,9 @@ class SrcFilesWS:
                             stalePath = path.join(destPltDir, existing)
                             remove(stalePath)
                             LOG(f"Removed stale checked-in XSA: {stalePath}")
-                # Impose read and write access for current files.
-                chmod(self.lsArchFl[pltIdx], S_IRUSR | S_IWUSR)
+                # Add owner read/write without dropping any existing
+                # exec/group/other bits (copy() propagates this mode).
+                chmod(self.lsArchFl[pltIdx], stat(self.lsArchFl[pltIdx]).st_mode | S_IRUSR | S_IWUSR)
                 # Check for write protected file in self.lsArchFl.
                 if access(self.lsArchFl[pltIdx], R_OK | W_OK):
                     copy(self.lsArchFl[pltIdx], destPltDir)
@@ -588,7 +590,8 @@ class SrcFilesWS:
                 # any nr of nested dirs found between <app-dir-src> and a file.
                 miscFileName = subItem[subItem.rfind(sep) + 1:]
                 destRoot = loc
-                if subItem.startswith(appSrcRoot + sep):
+                inAppSrcRoot = subItem.startswith(appSrcRoot + sep)
+                if inAppSrcRoot:
                     relPath = path.relpath(subItem, appSrcRoot)
                     if relPath.split(sep, 1)[0] in extraModuleNames:
                         destRoot = locFMisc
@@ -601,20 +604,26 @@ class SrcFilesWS:
                     nLoc = path.join(destRoot, relDirLoc)
                     if path.isdir(nLoc) is not True:
                         makedirs(nLoc)
-                    # Impose read and write access for current files.
-                    chmod(subItem, S_IRUSR | S_IWUSR)
+                    # Add owner read/write without dropping any existing
+                    # exec/group/other bits (copy() propagates this mode).
+                    chmod(subItem, stat(subItem).st_mode | S_IRUSR | S_IWUSR)
                     # Check for write protected file
                     if access(subItem, R_OK | W_OK):
                         copy(subItem, nLoc)
                     else:
                         LOG(f"File {subItem} is not writeable and readable")
                     continue
-                # Impose read and write access for current files.
-                chmod(subItem, S_IRUSR | S_IWUSR)
+                # Add owner read/write without dropping any existing
+                # exec/group/other bits (copy() propagates this mode).
+                chmod(subItem, stat(subItem).st_mode | S_IRUSR | S_IWUSR)
                 # Check for write protected file
                 if access(subItem, R_OK | W_OK):
-                    # Prefix - other misc files can exist ... tp(".","")
-                    if miscFileName.startswith("."):
+                    # Only a file gathered from OUTSIDE appSrcRoot (e.g. a
+                    # dotfile sitting directly in <app-dirname>) uses the
+                    # misc destination: a dotfile at the top of the app's
+                    # own "src" folder is a real source file and must stay
+                    # in loc, the only dir checkout.py re-imports.
+                    if not inAppSrcRoot and miscFileName.startswith("."):
                         copy(subItem, locFMisc)
                     else:
                         copy(subItem, loc)
@@ -798,18 +807,34 @@ class Workspace:
         an app in anyway would let a later checkout rebuild it against a
         standalone BSP instead, replacing its real target without any
         indication something went wrong - so it is rejected here instead
-        (see dJsonData["os"], vitis-comp.json's own recorded OS).
+        (see dJsonData["os"], vitis-comp.json's own recorded OS). HLS
+        components ("type" == "HLS") are excluded outright, not just
+        redirected to the "standalone" path: they are not application
+        components, may lack the "platform"/"os" fields read below, and
+        checkout.py always recreates any accepted component with
+        create_app_component(..., template="empty_application"), so an
+        HLS component could never round-trip correctly anyway.
         """
         NOT_PATH = -1
+        if dJsonData["type"] == "HLS":
+            # TODO: add a dedicated HLS check-in/checkout round-trip path
+            # (HLS components use their own kernel template/build flow,
+            # not "empty_application") instead of excluding them outright.
+            appName = pItem[pItem.rfind(sep) + 1:]
+            LOG(f"Skipping application \"{appName}\": HLS components are not "
+               f"bare-metal applications and checkout.py has no dedicated HLS "
+               f"check-in/checkout path; it must be checked in/managed separately.")
+            return
         if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
-            ((dJsonData["type"] == "HOST" or
-              dJsonData["type"] == "HLS") or
-              dJsonData["type"] == "UNKNOWN")
+            (dJsonData["type"] == "HOST" or dJsonData["type"] == "UNKNOWN")
             ):
             # Associate application with its platform.
             appName = pItem[pItem.rfind(sep) + 1:]
             appOs = dJsonData.get("os", "standalone")
             if appOs != "standalone":
+                # TODO: add real non-"standalone" (e.g. "linux") app
+                # support - a "linux" domain/template plus sysroot setup
+                # on the checkout.py side - instead of rejecting here.
                 LOG(f"Skipping application \"{appName}\": checking in a "
                    f"\"{appOs}\" application is not supported (checkout.py "
                    f"only reconstructs \"standalone\" bare-metal domains); "
@@ -860,14 +885,18 @@ class Workspace:
                 "xsa": relPathPlt,
                 "cpu_instance": cpuInstance
                 }
-            # Search for build file.
-            bFile = list(Path(pItem).rglob(
-                            SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX]))
-            # Just one element should be in the list.
-            if len(bFile) != UtilityWS.EMPTY_BUFFER:
+            # Resolve the canonical build file directly at
+            # <app-dir>/src/CMakeLists.txt instead of an app-wide recursive
+            # search: an extra module (a supported, separate top-level dir
+            # under the app, see checkout.py's _importAppExtraModules) can
+            # contain its own CMakeLists.txt, and filesystem traversal
+            # order is not guaranteed, so picking rglob's first result
+            # could silently select the wrong file instead of the app's own.
+            canonicalBuildFile = path.join(pItem, SrcFilesWS.APP_SRCCODE,
+                                           SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX])
+            if path.isfile(canonicalBuildFile):
                 lsDirApps.append(pItem)
-                # Populate in SrcFilesWS scope, SrcFilesWS.BUILD_FILE_IDX or simply 0.
-                self.sfWs.lsBldFl.append(path.join(pItem, str(bFile[SrcFilesWS.BUILD_FILE_IDX])))
+                self.sfWs.lsBldFl.append(canonicalBuildFile)
                 self.sfWs.lsTempSrcFl.append([])
                 # Collect source files from <app-dir>/src.
                 self.gatherAppSrcCd(pItem)
