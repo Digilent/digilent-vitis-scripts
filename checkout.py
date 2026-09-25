@@ -416,34 +416,32 @@ class Workspace:
         destroys repo-tracked files living inside the otherwise fully
         git-ignored workspace folder (see PRESERVED_WS_ENTRIES).
 
-        When ws_path does not exist yet (a genuinely fresh checkout, e.g. a
-        parent repository that has never run checkout.py before), the
-        ".keep" placeholder documented in README Note #3 (and negated by
-        _ensureParentGitignore) is created here too, instead of only ever
-        being preserved if it already happened to exist: otherwise a brand
-        new setup would never get a trackable file under ws/ at all, since
-        nothing else creates one.
+        The ".keep" placeholder (README Note #3, negated by
+        _ensureParentGitignore) is (re)created here unconditionally rather
+        than only when ws_path is missing: _prepareWorkspace already
+        creates ws_path beforehand, so that branch rarely fires and a
+        fresh/cleared workspace would otherwise get no trackable file.
 
         @Parameters
         ws_path: absolute path to the workspace directory to clear.
         """
         if not path.isdir(ws_path):
             makedirs(ws_path, exist_ok=True)
-            keep_path = path.join(ws_path, ".keep")
-            if not path.isfile(keep_path):
-                open(keep_path, "a", encoding="utf-8").close()
-            return
-        for entry in listdir(ws_path):
-            if entry in self.PRESERVED_WS_ENTRIES:
-                continue
-            entry_path = path.join(ws_path, entry)
-            if path.isdir(entry_path) and not path.islink(entry_path):
-                shutil.rmtree(entry_path, onerror=self._forceRemoveReadonly)
-            else:
-                try:
-                    remove(entry_path)
-                except PermissionError:
-                    self._forceRemoveReadonly(remove, entry_path, None)
+        else:
+            for entry in listdir(ws_path):
+                if entry in self.PRESERVED_WS_ENTRIES:
+                    continue
+                entry_path = path.join(ws_path, entry)
+                if path.isdir(entry_path) and not path.islink(entry_path):
+                    shutil.rmtree(entry_path, onerror=self._forceRemoveReadonly)
+                else:
+                    try:
+                        remove(entry_path)
+                    except PermissionError:
+                        self._forceRemoveReadonly(remove, entry_path, None)
+        keep_path = path.join(ws_path, ".keep")
+        if not path.isfile(keep_path):
+            open(keep_path, "a", encoding="utf-8").close()
 
     def _ensureParentGitignore(self, ws_path) -> None:
         """
@@ -1405,21 +1403,16 @@ class Workspace:
            f"of the {len(hw_platforms)} detected platforms to use!")
         return None
 
-    def _resolveAppDomain(self, app_name, comp_settings_path, plt) -> str:
+    def _resolveAppDomain(self, app_name, comp_settings_path, plt):
         """
         @Description
-        Pick which of the platform's domains (see _setPlatformDomainInfo)
-        `app_name` should be bound to, based on the exact processor/domain
-        instance recorded for it at check-in time (see getAppTargetProc).
-        Needed on a multi-processor xsa (e.g. a ZynqMP exposing both an
-        A-class and an R5), where a platform now has more than one domain
-        (see _buildPlatform) and blindly using the platform's default
-        domain would rebuild every app on whichever processor happens to
-        be first, losing its original CPU association. Falls back to the
-        platform's default/first-detected processor's domain when no such
-        entry is recorded (older comp-settings.json, or a brand-new app
-        never checked in before) or it does not match any domain actually
-        available on this platform.
+        Pick which platform domain (see _setPlatformDomainInfo) app_name
+        binds to, using the processor recorded at check-in time (see
+        getAppTargetProc): needed since a multi-processor xsa gets one
+        domain per processor (see _buildPlatform). A nonempty recorded
+        processor is authoritative - fails if it's no longer available,
+        instead of silently rebuilding against a different CPU. Falls
+        back to the platform's default domain only when none was recorded.
 
         @Parameters
         app_name: application folder name under `src`, used only for logging.
@@ -1428,23 +1421,24 @@ class Workspace:
             needs "domains"/"domain_name"/"name".
 
         @Returns
-        The domain name to bind `app_name` to.
+        The domain name to bind `app_name` to, or None if a nonempty
+        recorded processor is no longer available on this platform.
         """
         target_proc = self.getAppTargetProc(app_name, filepath=comp_settings_path)
-        if target_proc != "" and target_proc in plt["domains"]:
+        if target_proc == "":
+            return plt["domain_name"]
+        if target_proc in plt["domains"]:
             return plt["domains"][target_proc]
-        if target_proc != "":
-            LOG(f"Application \"{app_name}\" was checked in bound to processor "
-               f"\"{target_proc}\", which is not available on platform "
-               f"\"{plt['name']}\"; defaulting to \"{plt['domain_name']}\"")
-        return plt["domain_name"]
+        LOG(f"Application \"{app_name}\" was checked in bound to processor "
+           f"\"{target_proc}\", which is not available on platform "
+           f"\"{plt['name']}\"; refusing to rebuild it against a different CPU.")
+        return None
 
-    def _buildApplication(self, client, app_name, hw_platforms, repo_root) -> None:
+    def _buildApplication(self, client, app_name, hw_platforms, repo_root) -> bool:
         """
         @Description
-        Resolve (see _resolveAppPlatform), create, configure and build ONE
-        application component. Applications that cannot be resolved to a
-        platform are skipped, with a clear log message explaining why.
+        Resolve (see _resolveAppPlatform/_resolveAppDomain), create,
+        configure and build ONE application component.
 
         @Parameters
         client: Vitis client obj returned by create_client().
@@ -1452,15 +1446,23 @@ class Workspace:
         hw_platforms: dict produced by _discoverAppsAndPlatforms/
                      _buildPlatform, each value has "xpfm"/"domain_name".
         repo_root: absolute path to the parent repository (parent of `src`).
+
+        @Returns
+        True if the application was resolved and built. False if it could
+        not be resolved to a platform/domain (see _resolveAppPlatform/
+        _resolveAppDomain) - callers must treat this as a checkout
+        failure, not silently continue with an incomplete workspace.
         """
         comp_settings_path = (repo_root + sep + "src" + sep + app_name +
                               sep + Workspace.COMP_SETTINGS)
 
         plt = self._resolveAppPlatform(app_name, comp_settings_path, hw_platforms, repo_root)
         if plt is None:
-            return
+            return False
 
         domain_name = self._resolveAppDomain(app_name, comp_settings_path, plt)
+        if domain_name is None:
+            return False
         LOG(f"Creating application component \"{app_name}\" for platform \"{plt['name']}\" "
            f"(domain \"{domain_name}\")...")
         app = client.create_app_component(
@@ -1497,6 +1499,7 @@ class Workspace:
         self._importAppExtraModules(app, app_name, repo_root)
         self._removeTemplateCruft(app)
         self._buildAppWithFlagsRetry(app, app_name)
+        return True
 
     def _importAppExtraModules(self, app, app_name, repo_root) -> None:
         """
@@ -1823,6 +1826,7 @@ class Workspace:
                             client.delete_component(name=stale_name)
                     self._buildPlatform(client, xsa_path, plt, repo_path)
 
+            all_apps_resolved = True
             for app_name in app_names:
                 if selective and app_name not in apps:
                     continue
@@ -1832,7 +1836,17 @@ class Workspace:
                     if app_name in existing:
                         LOG(f"Deleting existing application component \"{app_name}\" for rebuild...")
                         client.delete_component(name=app_name)
-                    self._buildApplication(client, app_name, hw_platforms, repo_root)
+                    if not self._buildApplication(client, app_name, hw_platforms, repo_root):
+                        all_apps_resolved = False
+
+            if not all_apps_resolved:
+                # At least one application could not be resolved to a
+                # platform/domain (see _buildApplication) and was skipped:
+                # the workspace is incomplete, so callers/CI must be able
+                # to detect this instead of seeing a false success.
+                LOG("Checkout finished with at least one application skipped "
+                   "(see prior log messages); workspace is incomplete.")
+                return Workspace.FAILURE
 
             return Workspace.SUCCESS
         finally:
