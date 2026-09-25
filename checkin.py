@@ -707,6 +707,10 @@ class Workspace:
         # _buildZynqMPFsbl), not merely any name containing "fsbl" anywhere
         # (which would wrongly exclude e.g. a user app named "fsblinky_test").
         self.lsExcludedApps = [compile(r"_fsbl$", RegexFlag.IGNORECASE)]
+        # Set by processGatherFiles when an app's platform xsa could not be
+        # resolved: checkInSF checks this and fails instead of writing a
+        # comp-settings.json with a synthesized, known-nonexistent xsa path.
+        self.bPlatformResolutionFailed = False
         if UtilityWS.IS_DIRS:
             self.findPlatforms()
             # Set multiple Utility ... ? 'fa(), ...'
@@ -870,10 +874,16 @@ class Workspace:
                     relPathPlt = SrcFilesWS.APP_SRCCODE + sep + destDir + sep + actualXsaName
                     break
             if relPathPlt is None:
+                # Do not synthesize a guessed path here: it is already
+                # known not to exist (findPlatforms did not discover this
+                # platform), and writing it into comp-settings.json would
+                # let check-in report success while producing a backup
+                # checkout.py can never resolve. Fail check-in instead.
                 LOG(f"Application \"{appName}\" references platform \"{pltName}\" "
-                   f"which was not found among the discovered platforms; its "
-                   f"comp-settings.json xsa correlation entry may be wrong!")
-                relPathPlt = SrcFilesWS.APP_SRCCODE + sep + pltName + sep + pltName + ".xsa"
+                   f"which was not found among the discovered platforms; "
+                   f"cannot check in a valid xsa correlation for it.")
+                self.bPlatformResolutionFailed = True
+                return SrcFilesWS.FAILURE
             # Preserve the exact processor/domain this app was bound to
             # (e.g. "psu_cortexa53_0" vs "psu_cortexr5_0" on a
             # multi-processor xsa) alongside the xsa correlation, so
@@ -964,30 +974,54 @@ class Workspace:
         @Description
         Working dir when this func is called must be sw submodule. Anyway,
         sw structure had been verified long before calling findPlatforms.
-        Iterate over all content of <ws> to find *.xsa file(s). Only the first
-        file found is stored in self.sfWs.lsArchFl, <platform-dirname> into
-        self.sfWs.lsArchPltDir respectively. self.sfWs.lsArchSrcDir gets the
-        directory the xsa should be checked in UNDER src: the original
-        source folder name recorded by checkout.py in SRC_DIR_MANIFEST when
-        available (so a rename/disambiguation of the workspace platform
-        name, e.g. two xsa's sharing a stem, does not make check-in create
-        a brand-new "src" directory and orphan the original one, which
-        would leave a stale checked-in xsa for the next checkout to
-        rediscover as a bogus duplicate platform), otherwise the workspace
-        platform dirname itself (first-time check-in of a new platform).
+        Only components whose vitis-comp.json declares type "PLATFORM" are
+        considered (an application can legitimately carry its own xsa
+        asset). Iterate over its content to find *.xsa file(s): exactly one
+        is required, its path is stored in self.sfWs.lsArchFl,
+        <platform-dirname> into self.sfWs.lsArchPltDir respectively;
+        ambiguous (more than one) or missing xsa's are rejected/skipped
+        instead of guessing. self.sfWs.lsArchSrcDir gets the directory the
+        xsa should be checked in UNDER src: the original source folder name
+        recorded by checkout.py in SRC_DIR_MANIFEST when available (so a
+        rename/disambiguation of the workspace platform name, e.g. two
+        xsa's sharing a stem, does not make check-in create a brand-new
+        "src" directory and orphan the original one, which would leave a
+        stale checked-in xsa for the next checkout to rediscover as a bogus
+        duplicate platform), otherwise the workspace platform dirname
+        itself (first-time check-in of a new platform).
         """
         IDX_FRENC = 0
+        IDX_VCOMP = 0
         self.sfWs.lsArchFl, self.sfWs.lsArchPltDir, self.sfWs.lsArchSrcDir = [], [], []
         chdir(self.sfWs.appDir)
         pCwd = getcwd()
         for item in listdir(pCwd):
             if path.isdir(item) is False or item.startswith("."): continue
-            # Get handoff ~ can be more;
             pItem = path.join(pCwd, item)
+            # Only a vitis-comp.json-declared "PLATFORM" component is a
+            # platform: an application can legitimately carry its own xsa
+            # asset (e.g. a reference/test copy), and without this check
+            # it would be miscorrelated as a platform below.
+            cmpFile = list(Path(pItem).rglob(
+                            SrcFilesWS.lsConfCpy[SrcFilesWS.COMP_FILE_IDX]))
+            if len(cmpFile) == UtilityWS.EMPTY_BUFFER: continue
+            dJsonData = JSONDecoder().decode(open(str(cmpFile[IDX_VCOMP])).read())
+            if dJsonData.get("type") != "PLATFORM": continue
+            # Get handoff ~ can be more;
             archFile = list(Path(pItem).rglob(SrcFilesWS.HOFF_HDL))
-            # Just one element should be in the list.
-            # Maybe check for vitis-comp.json or other files specific to a platform ?
-            if len(archFile) != UtilityWS.EMPTY_BUFFER:
+            if len(archFile) == UtilityWS.EMPTY_BUFFER:
+                continue
+            elif len(archFile) > 1:
+                # A real platform can legitimately contain more than one
+                # xsa (e.g. the originally imported design alongside a
+                # regenerated export copy); picking an arbitrary one (rglob
+                # order is not guaranteed) risks copying/correlating the
+                # wrong handoff. Reject rather than guess.
+                LOG(f"Platform \"{item}\" contains {len(archFile)} xsa files; "
+                   f"cannot unambiguously determine its authoritative "
+                   f"handoff, skipping it.")
+                continue
+            else:
                 # Populate with xsa files path.
                 self.sfWs.lsArchFl.append(str(archFile[IDX_FRENC]))
                 # Preserve platforms dirs.
@@ -1034,11 +1068,19 @@ class Workspace:
         if not UtilityWS.IS_DIRS:
             return UtilityWS.FAILURE
         try:
-            iRet = self.sfWs.collectCpyFiles(self.cfgWs.refLApps)
-            if iRet == UtilityWS.SUCCESS:
-                iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
+            if self.bPlatformResolutionFailed:
+                # An app's platform xsa could not be resolved during
+                # discovery (see processGatherFiles); do not copy/encode
+                # anything that would produce an unusable checked-in state.
+                LOG("Aborting check-in: one or more applications' platform "
+                   "xsa could not be resolved.")
+                iRet = UtilityWS.FAILURE
             else:
-                LOG("collectCpyFiles failed, skipping metadata encoding.")
+                iRet = self.sfWs.collectCpyFiles(self.cfgWs.refLApps)
+                if iRet == UtilityWS.SUCCESS:
+                    iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
+                else:
+                    LOG("collectCpyFiles failed, skipping metadata encoding.")
         finally:
             # Stop the locally started Vitis server on every exit path,
             # including an exception raised above: a copy/JSON/Vitis error
