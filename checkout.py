@@ -462,6 +462,10 @@ class Workspace:
         than only when ws_path is missing: _prepareWorkspace already
         creates ws_path beforehand, so that branch rarely fires and a
         fresh/cleared workspace would otherwise get no trackable file.
+        "cleanup.cmd"/"cleanup.sh" are (re)installed here too: they are
+        checked in at the scripts repo root (README Note #3), but nothing
+        else copies them into ws, so without this the negated ignore
+        entries for them would refer to files that never actually exist.
 
         @Parameters
         ws_path: absolute path to the workspace directory to clear.
@@ -483,6 +487,12 @@ class Workspace:
         keep_path = path.join(ws_path, ".keep")
         if not path.isfile(keep_path):
             open(keep_path, "a", encoding="utf-8").close()
+        scripts_dir = path.dirname(path.abspath(__file__))
+        for cleanupScript in ("cleanup.cmd", "cleanup.sh"):
+            srcScript = path.join(scripts_dir, cleanupScript)
+            dstScript = path.join(ws_path, cleanupScript)
+            if path.isfile(srcScript) and not path.isfile(dstScript):
+                shutil.copy2(srcScript, dstScript)
 
     def _ensureParentGitignore(self, ws_path) -> None:
         """
