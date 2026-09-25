@@ -30,7 +30,8 @@ from tempfile import mkdtemp
 from hashlib import sha256
 import hsi
 import xsdb
-from misc import (LOG, stopDanglingVitisProcesses)
+import threading
+from misc import (LOG, stopDanglingVitisProcesses, listVitisProcesses)
 
 # Extensions _pruneStaleFiles treats as genuine (prunable) source files when
 # scanning an app's own top-level "src" dir, where sources and Vitis-
@@ -150,6 +151,55 @@ class _BuildLogFilter:
     def flush(self):
         self._logFile.flush()
         self._real.flush()
+
+class _BuildWatchdog:
+    """
+    @Description
+    Background thread used only to log periodic diagnostics while a build
+    step (see Workspace.quietBuild) appears to make no progress. A genuine
+    Vitis platform/app build is a single synchronous, uninterruptible gRPC
+    call with no live heartbeat of its own, so a real hang (observed in
+    practice: a leftover process from an earlier interrupted/Ctrl+C'd run
+    - see create_platform_component's swallowed KeyboardInterrupt - holding
+    a file lock or license checkout that silently blocks a brand-new run
+    forever) looks IDENTICAL to a slow-but-working build until someone
+    gives up guessing. This never cancels/times out the build itself
+    (that's not safely doable for a blocking gRPC call without risking a
+    half-built component); it only surfaces, every WARN_INTERVAL_SEC, a
+    snapshot of currently-running Vitis-related processes so a genuinely
+    stuck run can actually be diagnosed instead of silently sitting there.
+    """
+    WARN_INTERVAL_SEC = 180
+
+    def __init__(self, desc):
+        self._desc = desc
+        self._stopEvent = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stopEvent.set()
+        self._thread.join(timeout=5)
+        return False
+
+    def _run(self) -> None:
+        elapsedSec = 0
+        while not self._stopEvent.wait(self.WARN_INTERVAL_SEC):
+            elapsedSec += self.WARN_INTERVAL_SEC
+            try:
+                procs = listVitisProcesses(environ.get("XILINX_VITIS", ""))
+                procsDesc = ", ".join(f"{name} (pid {pid})" for pid, name in procs) or "none found"
+            except Exception as e:
+                procsDesc = f"unavailable ({e})"
+            LOG(f"WARNING: building {self._desc} has shown no progress for over "
+               f"{elapsedSec // 60} minute(s). Vitis gives no live build progress, "
+               "so this MAY just be a slow build - but if this never finishes, a "
+               "leftover process from an earlier interrupted (Ctrl+C'd) run can be "
+               "holding a file lock/license checkout that silently blocks this run "
+               f"forever. Currently running Vitis-related process(es): {procsDesc}")
 
 class Workspace:
     """
@@ -421,17 +471,18 @@ class Workspace:
         buildFn: bound method to call, taking no arguments.
         desc: short human-readable description, used only for logging.
         """
-        if not self._buildLogPath:
-            status = buildFn()
-        else:
-            LOG(f"Building {desc}, full Vitis build log kept at: {self._buildLogPath}")
-            realStdout = sys.stdout
-            with open(self._buildLogPath, "a", encoding="utf-8") as logFile:
-                sys.stdout = _BuildLogFilter(logFile, realStdout)
-                try:
-                    status = buildFn()
-                finally:
-                    sys.stdout = realStdout
+        with _BuildWatchdog(desc):
+            if not self._buildLogPath:
+                status = buildFn()
+            else:
+                LOG(f"Building {desc}, full Vitis build log kept at: {self._buildLogPath}")
+                realStdout = sys.stdout
+                with open(self._buildLogPath, "a", encoding="utf-8") as logFile:
+                    sys.stdout = _BuildLogFilter(logFile, realStdout)
+                    try:
+                        status = buildFn()
+                    finally:
+                        sys.stdout = realStdout
 
         if status is not None and status is not True and status != 0:
             raise Exception(f"Build failed for {desc} (status: {status}), see {self._buildLogPath}")
