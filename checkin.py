@@ -1097,7 +1097,30 @@ class Workspace:
                 if path.isfile(srcDirManifest):
                     with open(srcDirManifest, "r") as f:
                         manifestDir = f.read().strip()
-                    if manifestDir != "":
+                    # This manifest is later used, unvalidated, as a
+                    # destination dir under "src" (see collectCpyFiles,
+                    # which chdir's into "src" first and both mkdir's and
+                    # deletes stale xsa files inside destPltDir): a
+                    # corrupted/hand-edited manifest containing "..", an
+                    # absolute path, or any path separator could otherwise
+                    # make those operations escape "src" entirely. Accept
+                    # only a single safe directory name component and
+                    # silently keep the existing item/component-name
+                    # fallback (set above) for anything else, rather than
+                    # rejecting the whole platform over a bad manifest.
+                    isSafeSingleComponent = (
+                        manifestDir != "" and
+                        manifestDir not in (".", "..") and
+                        sep not in manifestDir and
+                        (path.altsep is None or path.altsep not in manifestDir) and
+                        not path.isabs(manifestDir)
+                        )
+                    if manifestDir != "" and not isSafeSingleComponent:
+                        LOG(f"Ignoring unsafe {SrcFilesWS.SRC_DIR_MANIFEST} "
+                           f"content \"{manifestDir}\" for platform \"{item}\": "
+                           f"expected a single directory name, falling back to "
+                           f"\"{item}\".")
+                    elif isSafeSingleComponent:
                         srcDir = manifestDir
                 self.sfWs.lsArchSrcDir.append(srcDir)
         # Get back to 'sw submodule'.
