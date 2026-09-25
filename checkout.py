@@ -689,6 +689,31 @@ class Workspace:
         self._buildLogPath = path.join(ws_path, "checkout_build.log")
         LOG(f"Successfully created Vitis client on workspace {client.get_workspace()}")
 
+    @staticmethod
+    def _isWorkspaceVersionMismatch(errMsg) -> bool:
+        """
+        @Description
+        Detect set_workspace's workspace-metadata "version" mismatch error
+        (see _setWorkspaceWithRetry) across Vitis releases that word it
+        differently, e.g. "Vitis IDE cannot recognize the workspace
+        version. Click 'Update' to initialize the workspace metadata." vs.
+        "Vitis CLI has detected a workspace from version . Use
+        update_workspace API to upgrade it to .". Rather than matching one
+        exact phrase (fragile across releases/locales), this matches
+        loosely on wording common to both: mentions "workspace", a
+        "version", and some form of "update".
+
+        @Parameters
+        errMsg: str(exception) raised by client.set_workspace.
+
+        @Returns
+        True if errMsg looks like this specific mismatch, not some other
+        set_workspace failure (e.g. a genuine lock/"already in use" error,
+        which never mentions "version").
+        """
+        msg = errMsg.lower()
+        return "workspace" in msg and "version" in msg and "update" in msg
+
     def _setWorkspaceWithRetry(self, client, ws_path) -> None:
         """
         @Description
@@ -713,11 +738,16 @@ class Workspace:
         processes/delete the lock file before every run.
 
         Also recovers from a distinct, unrelated failure mode: set_workspace
-        can reject ws_path with "Vitis IDE cannot recognize the workspace
-        version. Click 'Update' to initialize the workspace metadata." -
+        can reject ws_path over a workspace-metadata "version" mismatch -
         seen in practice even for a brand-new/just-wiped, completely empty
         ws_path (which has no "_ide" metadata to recognize yet either), not
-        just a genuinely older-version workspace. Retrying the identical
+        just a genuinely older-version workspace. The exact wording is not
+        stable across Vitis releases (seen so far: "Vitis IDE cannot
+        recognize the workspace version. Click 'Update' to initialize the
+        workspace metadata." and "Vitis CLI has detected a workspace from
+        version . Use update_workspace API to upgrade it to ."), so
+        _isWorkspaceVersionMismatch matches loosely on wording common to
+        both instead of one exact substring. Retrying the identical
         set_workspace call would just fail again unchanged, so this calls
         client.update_workspace(ws_path) instead - the client API's own
         documented remedy (mirroring the IDE's own "Update" button) that
@@ -734,7 +764,7 @@ class Workspace:
                 client.set_workspace(ws_path)
                 return
             except Exception as e:
-                if "recognize the workspace version" in str(e):
+                if self._isWorkspaceVersionMismatch(str(e)):
                     LOG(f"Workspace {ws_path} needs its metadata initialized/"
                        "migrated; retrying via update_workspace...")
                     try:
