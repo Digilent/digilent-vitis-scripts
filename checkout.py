@@ -182,6 +182,14 @@ class Workspace:
         # later gRPC call, never visible on its command line). So
         # force-killing pre-existing processes is opt-in, off by default.
         self._allowProcessCleanup = False
+        # Set from checkOutSF's assume_yes arg. When False (the default),
+        # _confirmWorkspaceWipe prompts interactively before a full checkout
+        # wipes a non-empty ws: checkin.py and checkout.py are invoked the
+        # same way (through _vitis.bat/.ps1/.sh), so a user meaning to check
+        # in un-checked-in workspace changes can easily run checkout.py by
+        # mistake instead and silently lose them. True skips the prompt, for
+        # unattended/CI use where no interactive terminal is available.
+        self._skipConfirmation = False
 
     def setConfigDomain(self,
                         domain,
@@ -549,6 +557,44 @@ class Workspace:
             f.write("\n".join(lines) + "\n")
         LOG(f"Added workspace ignore rules to {gitignore_path}")
 
+    def _confirmWorkspaceWipe(self, ws_path) -> None:
+        """
+        @Description
+        Guard against the easy mistake of running checkout.py (full wipe)
+        when checkin.py (check in first) was meant instead: both are
+        launched the same way (through _vitis.bat/.ps1/.sh), so a typo'd or
+        muscle-memory'd command can silently destroy workspace changes the
+        user never checked in. If ws_path contains anything besides
+        PRESERVED_WS_ENTRIES, prompt for an explicit "y" before letting
+        _prepareWorkspace proceed, unless self._skipConfirmation was opted
+        into (see checkOutSF's assume_yes) for unattended/CI runs where no
+        interactive terminal is available. Raises instead of returning a
+        status so an accidental/declined wipe is never mistaken for a
+        successful no-op checkout.
+
+        @Parameters
+        ws_path: absolute path to the workspace directory about to be wiped.
+        """
+        if not path.isdir(ws_path):
+            return
+        existing_entries = [entry for entry in listdir(ws_path)
+                            if entry not in self.PRESERVED_WS_ENTRIES]
+        if not existing_entries:
+            return
+        if self._skipConfirmation:
+            LOG(f"Workspace {ws_path} has existing content {existing_entries}; "
+               "proceeding without confirmation (assume_yes/-y).")
+            return
+        answer = input(
+            f"Workspace \"{ws_path}\" already has content ({existing_entries}) that "
+            "will be PERMANENTLY DELETED by this checkout. If you meant to check "
+            "in those changes first, answer \"n\" and run checkin.py instead. "
+            "Continue and wipe the workspace? [y/N]: "
+            )
+        if answer.strip().lower() not in ("y", "yes"):
+            raise Exception("Checkout aborted by user before wiping a non-empty workspace "
+                            "(pass assume_yes/-y to skip this prompt for unattended/CI runs).")
+
     def _prepareWorkspace(self, client, ws_path) -> None:
         """
         @Description
@@ -586,10 +632,18 @@ class Workspace:
         set_workspace is called again on ws_path afterward to reactivate
         it (its "_ide" metadata was just removed by the wipe anyway).
 
+        Before anything else, _confirmWorkspaceWipe guards against the easy
+        mistake of running this (full wipe) instead of checkin.py: if
+        ws_path already has non-preserved content, it prompts for
+        confirmation (or raises if declined/non-interactive without
+        self._skipConfirmation), so un-checked-in workspace changes are
+        never silently destroyed.
+
         @Parameters
         client: Vitis client obj returned by create_client().
         ws_path: absolute path to the workspace directory to (re)create.
         """
+        self._confirmWorkspaceWipe(ws_path)
         makedirs(ws_path, exist_ok=True)
         self._setWorkspaceWithRetry(client, ws_path)
 
@@ -1769,7 +1823,7 @@ class Workspace:
                     app.remove_files(files=[path.join(dirpath, filename)])
 
     def checkOutSF(self, platforms=None, apps=None, skip_unbound_platforms=False,
-                   incremental=False, allow_process_cleanup=False) -> int:
+                   incremental=False, allow_process_cleanup=False, assume_yes=False) -> int:
         """
         @Description
         Recreate a Vitis workspace from the parent repository's `src`
@@ -1824,11 +1878,20 @@ class Workspace:
                   line), so this is opt-in and should only be enabled on a
                   machine/CI runner where no other Vitis session runs
                   concurrently.
+        assume_yes: if True, skip _confirmWorkspaceWipe's interactive prompt
+                  and proceed straight to wiping a non-empty workspace on a
+                  full (non-selective) checkout. Off by default so a user
+                  who meant to run checkin.py first (both scripts are
+                  launched the same way, through _vitis.bat/.ps1/.sh) is
+                  warned before un-checked-in workspace changes are
+                  permanently deleted. Only meaningful without --platform/
+                  --app, since a selective rebuild never wipes the workspace.
         """
         platforms = set(platforms or [])
         apps = set(apps or [])
         selective = bool(platforms or apps)
         self._allowProcessCleanup = allow_process_cleanup
+        self._skipConfirmation = assume_yes
 
         script_path = path.dirname(path.abspath(__file__))
         repo_root = script_path[:script_path.rfind(sep)]
@@ -2088,9 +2151,14 @@ if __name__ == "__main__":
     meaningful together with --platform/--app, rebuilds an already-existing
     target in place (re-synced sources + cmake's own incremental compile)
     instead of deleting/recreating its component directory - much faster
-    for a quick source-edit-and-rebuild cycle. Examples (through
-    _vitis.bat/.ps1/.sh, which forward any extra args here):
+    for a quick source-edit-and-rebuild cycle. A full (non-selective)
+    checkout prompts for confirmation before wiping a non-empty workspace
+    (guards against accidentally running this instead of checkin.py);
+    pass -y/--assume-yes to skip that prompt for unattended/CI runs.
+    Examples (through _vitis.bat/.ps1/.sh, which forward any extra args
+    here):
         _vitis.bat -v 2025.2 -s .\\checkout.py
+        _vitis.bat -v 2025.2 -s .\\checkout.py -y
         _vitis.bat -v 2025.2 -s .\\checkout.py --platform my_platform
         _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app
         _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app --incremental
@@ -2136,6 +2204,16 @@ if __name__ == "__main__":
             "enable this on a machine/CI runner where no other Vitis session "
             "runs concurrently."
         )
+    parser.add_argument(
+        "-y", "--assume-yes", action="store_true",
+        help="Skip the interactive confirmation prompt before a full "
+            "(non-selective) checkout wipes a non-empty workspace. Off by "
+            "default: checkin.py and checkout.py are launched the same way, "
+            "so this guards against accidentally running checkout.py (which "
+            "deletes un-checked-in workspace changes) when checkin.py was "
+            "meant instead. Pass this for unattended/CI runs with no "
+            "interactive terminal."
+        )
     args = parser.parse_args()
 
     lcWs = Workspace()
@@ -2144,7 +2222,8 @@ if __name__ == "__main__":
         apps=args.app,
         skip_unbound_platforms=args.skip_unbound_platforms,
         incremental=args.incremental,
-        allow_process_cleanup=args.allow_process_cleanup
+        allow_process_cleanup=args.allow_process_cleanup,
+        assume_yes=args.assume_yes
         )
     LOG("Checkout finished with status: " + str(iRet))
     sys.exit(iRet)
