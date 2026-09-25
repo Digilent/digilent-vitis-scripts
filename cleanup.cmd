@@ -34,6 +34,7 @@ attrib +R .\LICENSE
 attrib +R .\README.md
 attrib +R .\.gitignore
 attrib +R .\.git
+attrib +R .\.keep
 
 rem delete all non read-only
 del /Q /A:-R .\*
