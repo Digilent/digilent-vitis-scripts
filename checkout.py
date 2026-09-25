@@ -1094,13 +1094,18 @@ class Workspace:
         platform: platform component obj (already built once) to attach the
                  FSBL domain/elf to.
         plt: entry from the hw_platforms dict, needs "name"/"target_proc".
-        repo_path: absolute path to the parent repository's `repo` folder
-                  (embeddedsw).
+        repo_path: absolute path to a custom embeddedsw checkout (see
+                  checkOutSF's esw_repo), or None to use whichever
+                  embeddedsw copy ships bundled with the Vitis install.
         """
         name = plt["name"]
         target_proc = plt["target_proc"]
 
-        embeddedsw = client.set_embedded_sw_repo(level="LOCAL", path=[repo_path])
+        if repo_path:
+            client.set_embedded_sw_repo(level="LOCAL", path=[repo_path])
+        else:
+            LOG(f"No --esw-repo provided: FSBL build for platform \"{name}\" will "
+               "use Vitis's own bundled embeddedsw repo.")
         fsbl_domain_name = f"{target_proc}_domain_fsbl"
         LOG(f"Adding domain \"{fsbl_domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
         zynqmp_fsbl_domain = platform.add_domain(
@@ -1157,8 +1162,10 @@ class Workspace:
         client: Vitis client obj returned by create_client().
         xsa_path: absolute path to this platform's xsa file.
         plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms).
-        repo_path: absolute path to the parent repository's `repo` folder
-                  (embeddedsw), only used for zynqmp platforms.
+        repo_path: absolute path to a custom embeddedsw checkout (see
+                  checkOutSF's esw_repo), or None to use whichever
+                  embeddedsw copy ships bundled with the Vitis install.
+                  Only used for zynqmp platforms.
         """
         name = plt["name"]
         arch = plt["arch"]
@@ -1823,7 +1830,8 @@ class Workspace:
                     app.remove_files(files=[path.join(dirpath, filename)])
 
     def checkOutSF(self, platforms=None, apps=None, skip_unbound_platforms=False,
-                   incremental=False, allow_process_cleanup=False, assume_yes=False) -> int:
+                   incremental=False, allow_process_cleanup=False, assume_yes=False,
+                   esw_repo=None) -> int:
         """
         @Description
         Recreate a Vitis workspace from the parent repository's `src`
@@ -1886,6 +1894,16 @@ class Workspace:
                   warned before un-checked-in workspace changes are
                   permanently deleted. Only meaningful without --platform/
                   --app, since a selective rebuild never wipes the workspace.
+        esw_repo: absolute path to a custom embeddedsw checkout, used only
+                  for zynqmp platforms' FSBL build (see _buildZynqMPFsbl)
+                  and $ENV{ESW_REPO} (read by the generated
+                  cortexa53_toolchain.cmake). Optional and off by default:
+                  a user isn't required to maintain a separate embeddedsw
+                  checkout just to check out this workspace, since Vitis
+                  already ships its own bundled embeddedsw copy and uses it
+                  automatically whenever this is None/omitted. Only pass
+                  this to override that bundled copy with a specific
+                  local checkout (e.g. one with custom BSP driver patches).
         """
         platforms = set(platforms or [])
         apps = set(apps or [])
@@ -1900,14 +1918,17 @@ class Workspace:
             ws_path = repo_root + f"{sep}ws" + f"_{date}"
         else:
             ws_path = repo_root + f"{sep}ws"
-        repo_path = repo_root + sep + "repo"
+        repo_path = esw_repo
 
-        # Domain/BSP generation resolves its CMake specs file from
-        # $ENV{ESW_REPO} (see the generated cortexa53_toolchain.cmake); point
-        # it at our embeddedsw submodule checkout before the Vitis server
-        # subprocess is spawned, since it inherits our process env only at
-        # spawn time.
-        environ["ESW_REPO"] = repo_path
+        if repo_path:
+            # Domain/BSP generation resolves its CMake specs file from
+            # $ENV{ESW_REPO} (see the generated cortexa53_toolchain.cmake);
+            # point it at the user-provided embeddedsw checkout before the
+            # Vitis server subprocess is spawned, since it inherits our
+            # process env only at spawn time. Optional: without esw_repo,
+            # $ENV{ESW_REPO} is left untouched and Vitis falls back to
+            # whichever embeddedsw copy ships bundled with the install.
+            environ["ESW_REPO"] = repo_path
 
         # Workaround for a real Vitis 2025.2 bug: the toolchain file Vitis
         # generates for each domain only sets the non-"_INIT"
@@ -2155,10 +2176,14 @@ if __name__ == "__main__":
     checkout prompts for confirmation before wiping a non-empty workspace
     (guards against accidentally running this instead of checkin.py);
     pass -y/--assume-yes to skip that prompt for unattended/CI runs.
+    --esw-repo is optional and only needed to override the embeddedsw copy
+    bundled with the Vitis install (used for zynqmp platforms' FSBL build);
+    omit it to use that bundled copy, the default.
     Examples (through _vitis.bat/.ps1/.sh, which forward any extra args
     here):
         _vitis.bat -v 2025.2 -s .\\checkout.py
         _vitis.bat -v 2025.2 -s .\\checkout.py -y
+        _vitis.bat -v 2025.2 -s .\\checkout.py --esw-repo C:\\path\\to\\embeddedsw
         _vitis.bat -v 2025.2 -s .\\checkout.py --platform my_platform
         _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app
         _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app --incremental
@@ -2214,6 +2239,14 @@ if __name__ == "__main__":
             "meant instead. Pass this for unattended/CI runs with no "
             "interactive terminal."
         )
+    parser.add_argument(
+        "--esw-repo", default=None, metavar="PATH",
+        help="Absolute path to a custom embeddedsw checkout, used only for "
+            "zynqmp platforms' FSBL build and $ENV{ESW_REPO}. Optional: "
+            "omit this to use whichever embeddedsw copy ships bundled with "
+            "the Vitis install (the default). Only needed to override that "
+            "bundled copy with a specific local checkout."
+        )
     args = parser.parse_args()
 
     lcWs = Workspace()
@@ -2223,7 +2256,8 @@ if __name__ == "__main__":
         skip_unbound_platforms=args.skip_unbound_platforms,
         incremental=args.incremental,
         allow_process_cleanup=args.allow_process_cleanup,
-        assume_yes=args.assume_yes
+        assume_yes=args.assume_yes,
+        esw_repo=args.esw_repo
         )
     LOG("Checkout finished with status: " + str(iRet))
     sys.exit(iRet)
