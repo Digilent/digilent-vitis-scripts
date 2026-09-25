@@ -725,13 +725,26 @@ class Workspace:
         # caller/CI cannot mistake this partial backup for a complete one.
         self.bIncompleteCheckIn = False
         if UtilityWS.IS_DIRS:
-            self.findPlatforms()
-            # Set multiple Utility ... ? 'fa(), ...'
-            # ~ Set ConfigWS paths for platforms too ~
-            self.cfgWs = ConfigWS()
-            _lApps = self.findApplications()
-            self.cfgWs.setApps(_lApps)
-            LOG("All files have been collected!")
+            try:
+                self.findPlatforms()
+                # Set multiple Utility ... ? 'fa(), ...'
+                # ~ Set ConfigWS paths for platforms too ~
+                self.cfgWs = ConfigWS()
+                _lApps = self.findApplications()
+                self.cfgWs.setApps(_lApps)
+                LOG("All files have been collected!")
+            except Exception:
+                # self.sfWs = SrcFilesWS() above already started the local
+                # Vitis server (see UtilityWS.__init__), before checkInSF's
+                # own try/finally exists to stop it on the way out. Without
+                # this, any JSON/filesystem/Vitis error raised by
+                # findPlatforms/findApplications would leave that server
+                # process and its workspace lock dangling, since checkInSF
+                # (and its shutdown finally) is never reached.
+                if UtilityWS.srvCl is not None and not UtilityWS.SET_IP_PORT:
+                    LOG("Stopping Vitis server after a construction-time error...")
+                    UtilityWS.srvCl.stop()
+                raise
 
     def gatherAppSrcCd(self,
                        pSrcFl : str
