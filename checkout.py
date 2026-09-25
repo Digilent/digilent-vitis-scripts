@@ -709,6 +709,19 @@ class Workspace:
         try:
             self._setWorkspaceWithRetry(client, scratch_ws)
 
+            # Empirically, set_workspace switching the server's active
+            # workspace away from ws_path does not synchronously release
+            # its own file handle on ws_path's "_ide/logs/vitis.log" (seen
+            # in practice: the very first clear attempt below fails with
+            # WinError 32 on that exact file - NOT from some OTHER dangling
+            # process, but from THIS run's own just-switched-away server,
+            # which only lets go of it a moment later). A short grace
+            # delay here avoids burning through the whole clear-retry loop
+            # (and needlessly suggesting --allow-process-cleanup, which
+            # would not even help here: stopDanglingVitisProcesses
+            # deliberately excludes this run's own just-started server).
+            time.sleep(1)
+
             max_try = 5
             for attempt in range(1, max_try + 1):
                 try:
