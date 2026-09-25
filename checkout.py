@@ -289,6 +289,13 @@ class Workspace:
         # mistake instead and silently lose them. True skips the prompt, for
         # unattended/CI use where no interactive terminal is available.
         self._skipConfirmation = False
+        # Populated by _filterXsaFilesByVitisVersion (absolute xsa paths
+        # skipped for a positively-confirmed version mismatch): lets
+        # _resolveAppPlatform tell an app bound to one of these apart from
+        # one whose xsa reference is simply wrong/stale, with a distinct
+        # log message either way still results in a FAILURE return - only
+        # WHY is different.
+        self._versionSkippedXsaPaths = set()
 
     def setConfigDomain(self,
                         domain,
@@ -1102,6 +1109,11 @@ class Workspace:
                    f"incompatible with the running Vitis {runningVersion} (a "
                    "version mismatch here has been observed to hang, not "
                    "cleanly fail, during platform export/DTS generation).")
+                # Recorded so _resolveAppPlatform can later tell an app
+                # bound to THIS xsa apart from one whose reference is
+                # simply wrong/stale (see _versionSkippedXsaPaths).
+                self._versionSkippedXsaPaths.add(
+                    self._normalizeXsaPathForCompare(xsa_path))
                 continue
             compatible.append(xsa_path)
         return compatible
@@ -1900,8 +1912,25 @@ class Workspace:
             # would silently bind the app to a platform it never asked
             # for (defeating the stored hardware association and possibly
             # building for the wrong target).
-            LOG(f"Application \"{app_name}\" references XSA \"{requested_xsa}\" "
-               f"which was not found among the detected platforms!")
+            if requested_xsa_abs in self._versionSkippedXsaPaths:
+                # Distinguish this from a genuinely wrong/stale xsa
+                # reference below: this app's xsa DID exist and WAS
+                # detected, it was deliberately skipped upfront for a
+                # positively-confirmed Vitis version mismatch (see
+                # _filterXsaFilesByVitisVersion). Still a FAILURE either
+                # way (the app can't be built without its platform), but
+                # the operator needs to know WHY so they fix the actual
+                # xsa/Vitis mismatch instead of chasing a phantom
+                # "missing platform" bug.
+                LOG(f"Application \"{app_name}\" references XSA \"{requested_xsa}\" "
+                   "which was skipped for a Vitis version mismatch (see "
+                   "the earlier \"Skipping\" message): resolve that "
+                   "mismatch (regenerate/replace the xsa, or run with a "
+                   "matching Vitis version) before this application can "
+                   "be built.")
+            else:
+                LOG(f"Application \"{app_name}\" references XSA \"{requested_xsa}\" "
+                   f"which was not found among the detected platforms!")
             return None
 
         if len(hw_platforms) == 1:
