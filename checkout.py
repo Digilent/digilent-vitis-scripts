@@ -156,23 +156,36 @@ class _BuildWatchdog:
     """
     @Description
     Background thread used only to log periodic diagnostics while a build
-    step (see Workspace.quietBuild) appears to make no progress. A genuine
-    Vitis platform/app build is a single synchronous, uninterruptible gRPC
-    call with no live heartbeat of its own, so a real hang (observed in
-    practice: a leftover process from an earlier interrupted/Ctrl+C'd run
-    - see create_platform_component's swallowed KeyboardInterrupt - holding
-    a file lock or license checkout that silently blocks a brand-new run
-    forever) looks IDENTICAL to a slow-but-working build until someone
-    gives up guessing. This never cancels/times out the build itself
-    (that's not safely doable for a blocking gRPC call without risking a
-    half-built component); it only surfaces, every WARN_INTERVAL_SEC, a
-    snapshot of currently-running Vitis-related processes so a genuinely
-    stuck run can actually be diagnosed instead of silently sitting there.
+    step (see Workspace.quietBuild) shows no CONSOLE output for a while.
+    Vitis's own build log is extremely verbose but almost entirely filtered
+    out by _BuildLogFilter (only error/warning/"build finished" lines pass
+    through to the terminal), so a real multi-minute step (e.g. ZynqMP
+    platform export/DTS generation) that is still genuinely working looks
+    IDENTICAL, from the console alone, to an actual hang (e.g. a leftover
+    process from an earlier interrupted/Ctrl+C'd run - see
+    create_platform_component's swallowed KeyboardInterrupt - holding a
+    file lock/license checkout). Confirmed in practice: a "stuck" build
+    was still writing new files under the workspace minutes after this
+    watchdog's own warning fired, and finished successfully afterwards.
+
+    To tell these apart, this checks ws_path's most-recently-modified
+    file's mtime instead of relying on process presence alone (Vitis's own
+    backend process is legitimately always still alive either way, so it
+    alone cannot distinguish a hang from a slow build - see the process
+    snapshot printed by the WARNING path below). Recent file activity
+    means real (if silent) progress, logged as a reassuring INFO line
+    instead of an alarming one; only once file activity itself has
+    stalled does this actually warn, since that combination (no console
+    output AND no file writes) is what a genuine hang looks like.
+
+    This never cancels/times out the build itself (not safely doable for
+    a blocking gRPC call without risking a half-built component).
     """
     WARN_INTERVAL_SEC = 180
 
-    def __init__(self, desc):
+    def __init__(self, desc, ws_path=""):
         self._desc = desc
+        self._wsPath = ws_path
         self._stopEvent = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -185,10 +198,40 @@ class _BuildWatchdog:
         self._thread.join(timeout=5)
         return False
 
+    @staticmethod
+    def _mostRecentMtime(ws_path):
+        """
+        @Returns
+        The newest mtime (epoch seconds) of any file under ws_path, or
+        None if ws_path doesn't exist/is empty/is unreadable.
+        """
+        latest = None
+        try:
+            for root, _dirs, files in walk(ws_path):
+                for f in files:
+                    try:
+                        mtime = path.getmtime(path.join(root, f))
+                    except OSError:
+                        continue
+                    if latest is None or mtime > latest:
+                        latest = mtime
+        except OSError:
+            pass
+        return latest
+
     def _run(self) -> None:
         elapsedSec = 0
         while not self._stopEvent.wait(self.WARN_INTERVAL_SEC):
             elapsedSec += self.WARN_INTERVAL_SEC
+            now = time.time()
+            latestMtime = self._mostRecentMtime(self._wsPath) if self._wsPath else None
+            if latestMtime is not None and (now - latestMtime) < self.WARN_INTERVAL_SEC:
+                LOG(f"Still building {self._desc}: no console output for over "
+                   f"{elapsedSec // 60} minute(s), but files under the workspace "
+                   f"were last modified {int(now - latestMtime)}s ago - Vitis's own "
+                   "progress output is mostly filtered out (see quietBuild), so this "
+                   "is expected for a big/slow build step, not a hang.")
+                continue
             try:
                 vitisRoot = environ.get("XILINX_VITIS", "")
                 allProcs = listVitisProcesses(vitisRoot)
@@ -198,11 +241,11 @@ class _BuildWatchdog:
                 ownDesc = ", ".join(f"{name} (pid {pid})" for pid, name in ownProcs) or "none found (may have crashed)"
             except Exception as e:
                 staleDesc = ownDesc = f"unavailable ({e})"
-            LOG(f"WARNING: building {self._desc} has shown no progress for over "
-               f"{elapsedSec // 60} minute(s). Vitis gives no live build progress, "
-               "so this MAY just be a slow build. Leftover process(es) from an "
-               f"EARLIER run (a likely cause of a genuine hang): {staleDesc}. This "
-               f"run's own Vitis backend, still alive: {ownDesc}.")
+            LOG(f"WARNING: building {self._desc} has shown no console output AND no "
+               f"workspace file activity for over {elapsedSec // 60} minute(s) - this "
+               "looks like a genuine hang, not just a slow build. Leftover process(es) "
+               f"from an EARLIER run (a likely cause): {staleDesc}. This run's own "
+               f"Vitis backend, still alive: {ownDesc}.")
 
 class Workspace:
     """
@@ -474,7 +517,7 @@ class Workspace:
         buildFn: bound method to call, taking no arguments.
         desc: short human-readable description, used only for logging.
         """
-        with _BuildWatchdog(desc):
+        with _BuildWatchdog(desc, self._wsPath):
             if not self._buildLogPath:
                 status = buildFn()
             else:
@@ -1361,7 +1404,7 @@ class Workspace:
                   embeddedsw copy ships bundled with the Vitis install.
                   Only used for zynqmp platforms.
         """
-        with _BuildWatchdog(f"platform \"{plt['name']}\""):
+        with _BuildWatchdog(f"platform \"{plt['name']}\"", self._wsPath):
             self._buildPlatformImpl(client, xsa_path, plt, repo_path)
 
     def _buildPlatformImpl(self, client, xsa_path, plt, repo_path) -> None:
