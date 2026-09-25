@@ -26,6 +26,7 @@ from json import JSONDecoder
 from os import (path, walk, listdir, remove,
                 sep, makedirs, chmod, environ)
 from stat import S_IWRITE
+from tempfile import mkdtemp
 import hsi
 import xsdb
 from misc import (LOG, stopDanglingVitisProcesses)
@@ -84,17 +85,20 @@ def GetMetadata(**kwargs):
             #  xv_pycommontasks - py extension module (on win)
             #  xv_hsmpytasks - py extension module (on win)
             HwDesign = hsi.HwManager.open_hw_design(xsa)
+            SUPPORTED_PROCESSOR_IP_NAMES = (
+                "psu_cortexa53", "psu_cortexa72", "psu_cortexr5",
+                "psv_cortexa72", "psv_cortexr5", "ps7_cortexa9",
+                "microblaze"
+                )
             try:
                 ret_metadata["arch"] = HwDesign.FAMILY
                 for proc in HwDesign.get_cells(hierarchical="true", filter="IP_TYPE==PROCESSOR"):
-                    if ((proc.IP_NAME == "psu_cortexa53" or
-                         proc.IP_NAME == "psu_cortexa72" or
-                         proc.IP_NAME == "psu_cortexr5") or
-                        (proc.IP_NAME == "psv_cortexa72" or
-                         proc.IP_NAME == "psv_cortexr5") or
-                        proc.IP_NAME == "ps7_cortexa9"
-                        ):
-                        proc_name = proc.IP_NAME + "_0"
+                    if proc.IP_NAME in SUPPORTED_PROCESSOR_IP_NAMES:
+                        # Use the cell's own instance name (e.g.
+                        # "microblaze_1"), not an assumed "<ip_name>_0":
+                        # a design can expose a differently-numbered or
+                        # multiple instances of the same IP.
+                        proc_name = proc.NAME
                         # Multi-processor XSAs (e.g. ZynqMP exposing both an
                         # A-class and an R5) must yield one domain per
                         # processor, not just the first found: keep scanning
@@ -529,9 +533,11 @@ class Workspace:
         locked), so wiping first and only then discovering a lock via a
         failed set_workspace can already have destroyed an actively used
         workspace's unlocked project files by the time the one locked file
-        is reached. set_workspace is called again after the wipe, since
-        clearing ws_path's contents also removes the "_ide" workspace
-        metadata the first call just created.
+        is reached. That same call also makes THIS server ws_path's active
+        owner though, so the client is switched to a throwaway scratch
+        workspace to release ws_path's own lock before it is wiped, then
+        set_workspace is called again on ws_path afterward to reactivate
+        it (its "_ide" metadata was just removed by the wipe anyway).
 
         @Parameters
         client: Vitis client obj returned by create_client().
@@ -540,27 +546,39 @@ class Workspace:
         makedirs(ws_path, exist_ok=True)
         self._setWorkspaceWithRetry(client, ws_path)
 
-        max_try = 5
-        for attempt in range(1, max_try + 1):
-            try:
-                self._clearWorkspaceContents(ws_path)
-                LOG(f"Cleared workspace {ws_path} on attempt {attempt}.")
-                break
-            except Exception as e:
-                LOG(f"Attempt {attempt} to clear the old workspace failed: {e}")
-                if attempt < max_try:
-                    if self._allowProcessCleanup:
-                        stopped = stopDanglingVitisProcesses(environ.get("XILINX_VITIS", ""), _PROCESS_START_TIME)
-                        if stopped:
-                            LOG(f"Stopped dangling Vitis process(es) holding the workspace: {stopped}")
-                    else:
-                        LOG("Not stopping any Vitis process automatically (pass "
-                            "allow_process_cleanup/--allow-process-cleanup to enable this "
-                            "if you know no other Vitis session is active on this machine).")
-                    time.sleep(1)
-        else:
-            raise Exception("Failed to delete old workspace even after stopping dangling Vitis "
-                            "processes. Please delete it manually before running checkout again.")
+        # The set_workspace call above makes THIS server the active owner
+        # of ws_path's own "_ide/.wsdata/.lock", so clearing ws_path next
+        # while still holding it open fails on Windows (WinError 32) - the
+        # retry cleanup below only ever targets OTHER dangling processes,
+        # never ourselves. Switch to a throwaway scratch workspace first to
+        # release ws_path's lock before deleting anything under it.
+        scratch_ws = mkdtemp(prefix="vitis_scratch_")
+        try:
+            self._setWorkspaceWithRetry(client, scratch_ws)
+
+            max_try = 5
+            for attempt in range(1, max_try + 1):
+                try:
+                    self._clearWorkspaceContents(ws_path)
+                    LOG(f"Cleared workspace {ws_path} on attempt {attempt}.")
+                    break
+                except Exception as e:
+                    LOG(f"Attempt {attempt} to clear the old workspace failed: {e}")
+                    if attempt < max_try:
+                        if self._allowProcessCleanup:
+                            stopped = stopDanglingVitisProcesses(environ.get("XILINX_VITIS", ""), _PROCESS_START_TIME)
+                            if stopped:
+                                LOG(f"Stopped dangling Vitis process(es) holding the workspace: {stopped}")
+                        else:
+                            LOG("Not stopping any Vitis process automatically (pass "
+                                "allow_process_cleanup/--allow-process-cleanup to enable this "
+                                "if you know no other Vitis session is active on this machine).")
+                        time.sleep(1)
+            else:
+                raise Exception("Failed to delete old workspace even after stopping dangling Vitis "
+                                "processes. Please delete it manually before running checkout again.")
+        finally:
+            shutil.rmtree(scratch_ws, ignore_errors=True)
 
         self._setWorkspaceWithRetry(client, ws_path)
         makedirs(ws_path, exist_ok=True)
@@ -785,12 +803,11 @@ class Workspace:
         for xsa_path, plt in hw_platforms.items():
             metadata = self._extractXsaMetadataScratch(xsa_path, plt["name"])
             plt["arch"] = metadata["arch"]
-            if plt["arch"] in ("spartan7", "artix7", "kintex7"):
-                plt["target_proc"] = "microblaze_0"
-                plt["target_procs"] = [plt["target_proc"]]
-            else:
-                plt["target_proc"] = metadata["target_proc"]
-                plt["target_procs"] = metadata["target_procs"]
+            # GetMetadata itself now recognizes MicroBlaze processor cells
+            # (see SUPPORTED_PROCESSOR_IP_NAMES) and derives their real
+            # instance name, so no FAMILY-based override is needed here.
+            plt["target_proc"] = metadata["target_proc"]
+            plt["target_procs"] = metadata["target_procs"]
             LOG(f"Platform \"{plt['name']}\": detected arch \"{plt['arch']}\", "
                f"available target processor(s): {plt['target_procs']}")
 
@@ -1056,7 +1073,8 @@ class Workspace:
         self._writePlatformSourceDirManifest(platform, plt["hw_pf_dir"])
 
         for target_proc in target_procs:
-            domain_name = "domain_microblaze_0" if is_microblaze else f"domain_{target_proc}"
+            proc_is_microblaze = target_proc.startswith("microblaze")
+            domain_name = f"domain_{target_proc}"
 
             LOG(f"Adding domain \"{domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
             # support_app must match the template _buildApplication actually uses
@@ -1065,6 +1083,9 @@ class Workspace:
             # this as "hello_world" causes a mismatched BSP that can fail its own
             # CMake toolchain test when a second platform is built in the same
             # workspace/session.
+            # TODO: add real "linux" (and other non-"standalone") OS/domain
+            # support here - checkin.py currently rejects any such app, so
+            # this only ever needs to build "standalone" domains for now.
             domain = platform.add_domain(
                 cpu=target_proc,
                 os="standalone",
@@ -1089,7 +1110,7 @@ class Workspace:
             # CMakeCache.txt afterwards.
             self._fixDomainCmakeFlags(client.get_workspace(), name, domain_name)
 
-            if is_microblaze:
+            if proc_is_microblaze:
                 self._configureMicroblazeDomain(domain, domain_name)
 
         self.quietBuild(platform.build, f"platform \"{name}\"")
@@ -1108,20 +1129,19 @@ class Workspace:
         platform that is being intentionally left alone during a selective
         rebuild (see --platform/--app), whose "domains"/"domain_name"/
         "xpfm" would otherwise never get filled in without rebuilding it
-        (all are pure functions of plt's own "name"/"arch"/"target_proc"/
+        (all are pure functions of plt's own "name"/"target_proc"/
         "target_procs", already known from _extractPlatformMetadata, not of
         anything the actual build produces).
 
         @Parameters
         client: Vitis client obj returned by create_client().
         plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms/
-            _extractPlatformMetadata), needs "name"/"arch"/"target_proc"/
+            _extractPlatformMetadata), needs "name"/"target_proc"/
             "target_procs".
         """
         name = plt["name"]
-        is_microblaze = plt["arch"] in ("spartan7", "artix7", "kintex7")
         plt["domains"] = {
-            target_proc: ("domain_microblaze_0" if is_microblaze else f"domain_{target_proc}")
+            target_proc: f"domain_{target_proc}"
             for target_proc in plt["target_procs"]
             }
         # Default/fallback domain (e.g. for an app with no recorded
@@ -1433,6 +1453,31 @@ class Workspace:
            f"\"{target_proc}\", which is not available on platform "
            f"\"{plt['name']}\"; refusing to rebuild it against a different CPU.")
         return None
+
+    def _appHasValidMapping(self, app_name, hw_platforms, repo_root) -> bool:
+        """
+        @Description
+        Check, without side effects, whether app_name resolves to a valid
+        platform+domain (see _resolveAppPlatform/_resolveAppDomain). Used
+        to validate every selected app up front before checkOutSF deletes
+        or rebuilds any of them, so an unresolvable one is caught before an
+        earlier, previously-working component is destroyed.
+
+        @Parameters
+        app_name: application folder name under `src`.
+        hw_platforms: dict produced by _discoverAppsAndPlatforms/
+                     _buildPlatform, each value has "domains"/"domain_name".
+        repo_root: absolute path to the parent repository (parent of `src`).
+
+        @Returns
+        True if app_name resolves to both a platform and a domain.
+        """
+        comp_settings_path = (repo_root + sep + "src" + sep + app_name +
+                              sep + Workspace.COMP_SETTINGS)
+        plt = self._resolveAppPlatform(app_name, comp_settings_path, hw_platforms, repo_root)
+        if plt is None:
+            return False
+        return self._resolveAppDomain(app_name, comp_settings_path, plt) is not None
 
     def _buildApplication(self, client, app_name, hw_platforms, repo_root) -> bool:
         """
@@ -1825,6 +1870,26 @@ class Workspace:
                             LOG(f"Deleting existing component \"{stale_name}\" for rebuild...")
                             client.delete_component(name=stale_name)
                     self._buildPlatform(client, xsa_path, plt, repo_path)
+
+            # Validate every app that will be deleted-and-rebuilt (i.e. not
+            # handled in-place, see `incremental` above) BEFORE deleting any
+            # of them: otherwise a later unresolvable app's failure is only
+            # discovered by _buildApplication after an earlier, previously
+            # working component has already been destroyed.
+            rebuild_apps = [
+                app_name for app_name in app_names
+                if not (selective and app_name not in apps)
+                and not (incremental and app_name in existing)
+                ]
+            unresolved_apps = [
+                app_name for app_name in rebuild_apps
+                if not self._appHasValidMapping(app_name, hw_platforms, repo_root)
+                ]
+            if unresolved_apps:
+                LOG(f"Aborting before deleting any component: application(s) "
+                   f"{unresolved_apps} could not be resolved to a platform/domain "
+                   f"(see prior log messages).")
+                return Workspace.FAILURE
 
             all_apps_resolved = True
             for app_name in app_names:
