@@ -20,7 +20,7 @@ from os import (chdir, getcwd, listdir,
 from stat import (S_IWUSR, S_IRUSR)
 from vitis import (_build, _server)
 from pathlib import Path
-from shutil import copy
+from shutil import copy, rmtree
 from json import (JSONEncoder, JSONDecoder)
 from re import (compile, escape, RegexFlag)
 from sys import exit as sys_exit
@@ -796,6 +796,27 @@ class Workspace:
                 if path.exists(pGIgn) is True:
                     self.sfWs.lsTempSrcFl[self.idxApp].append([pGIgn])
 
+    def _removeStaleCheckedInApp(self, appName : str) -> None:
+        """
+        @Description
+        Delete this app's previously checked-in "<sw>/src/<appName>" copy,
+        if any. Called when processGatherFiles decides an app can no
+        longer be checked in (e.g. its type/OS changed to something
+        unsupported): without this, a stale copy from an earlier, still-
+        supported check-in would otherwise be left untouched, and
+        checkout.py would keep recreating that stale/incompatible
+        application on every future checkout while this check-in still
+        reports success.
+
+        @Parameters
+        appName: workspace component directory name of the app to remove.
+        """
+        staleDir = path.join(self.sfWs.pSubSw, SrcFilesWS.APP_SRCCODE, appName)
+        if path.isdir(staleDir):
+            rmtree(staleDir)
+            LOG(f"Removed stale checked-in application \"{appName}\": it "
+               f"can no longer be checked in from the current workspace.")
+
     def processGatherFiles(self,
                            cmpFile : list,
                            dJsonData : dict,
@@ -832,6 +853,7 @@ class Workspace:
             LOG(f"Skipping application \"{appName}\": HLS components are not "
                f"bare-metal applications and checkout.py has no dedicated HLS "
                f"check-in/checkout path; it must be checked in/managed separately.")
+            self._removeStaleCheckedInApp(appName)
             return
         if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
             (dJsonData["type"] == "HOST" or dJsonData["type"] == "UNKNOWN")
@@ -847,6 +869,7 @@ class Workspace:
                    f"\"{appOs}\" application is not supported (checkout.py "
                    f"only reconstructs \"standalone\" bare-metal domains); "
                    f"it must be checked in/managed separately.")
+                self._removeStaleCheckedInApp(appName)
                 return
             lHwPlt = dJsonData["platform"]
             # This idx has two uses, one for path like values in "platform"
