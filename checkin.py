@@ -715,6 +715,15 @@ class Workspace:
         # resolved: checkInSF checks this and fails instead of writing a
         # comp-settings.json with a synthesized, known-nonexistent xsa path.
         self.bPlatformResolutionFailed = False
+        # Set by processGatherFiles when an app is skipped for being an HLS
+        # component or a non-"standalone" OS (see its docstring): unlike
+        # bPlatformResolutionFailed, this does NOT abort the run early -
+        # those apps are routinely, expectedly unsupported (must be
+        # checked in/managed separately) and every other app/platform must
+        # still be checked in normally. checkInSF instead downgrades an
+        # otherwise-successful result to FAILURE at the very end, so a
+        # caller/CI cannot mistake this partial backup for a complete one.
+        self.bIncompleteCheckIn = False
         if UtilityWS.IS_DIRS:
             self.findPlatforms()
             # Set multiple Utility ... ? 'fa(), ...'
@@ -854,6 +863,7 @@ class Workspace:
                f"bare-metal applications and checkout.py has no dedicated HLS "
                f"check-in/checkout path; it must be checked in/managed separately.")
             self._removeStaleCheckedInApp(appName)
+            self.bIncompleteCheckIn = True
             return
         if (len(cmpFile) != UtilityWS.EMPTY_BUFFER and
             (dJsonData["type"] == "HOST" or dJsonData["type"] == "UNKNOWN")
@@ -870,6 +880,7 @@ class Workspace:
                    f"only reconstructs \"standalone\" bare-metal domains); "
                    f"it must be checked in/managed separately.")
                 self._removeStaleCheckedInApp(appName)
+                self.bIncompleteCheckIn = True
                 return
             lHwPlt = dJsonData["platform"]
             # This idx has two uses, one for path like values in "platform"
@@ -1122,6 +1133,16 @@ class Workspace:
                     iRet = self.cfgWs.utilCfgWs.encJSON_Ws(self.cfgWs.bdRes, locations=self.cfgWs.refLApps)
                 else:
                     LOG("collectCpyFiles failed, skipping metadata encoding.")
+                if iRet == UtilityWS.SUCCESS and self.bIncompleteCheckIn:
+                    # At least one application was skipped (HLS component or
+                    # non-"standalone" OS, see processGatherFiles) and any
+                    # stale checked-in copy of it removed: everything else
+                    # was still checked in normally, but the overall backup
+                    # is incomplete, so a caller/CI must be able to detect
+                    # this instead of seeing a false success.
+                    LOG("Check-in finished with at least one application skipped "
+                       "(see prior log messages); checked-in backup is incomplete.")
+                    iRet = UtilityWS.FAILURE
         finally:
             # Stop the locally started Vitis server on every exit path,
             # including an exception raised above: a copy/JSON/Vitis error
