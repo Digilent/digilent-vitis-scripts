@@ -1305,6 +1305,18 @@ class Workspace:
         if is_microblaze:
             platform_kwargs["no_boot_bsp"] = True
         platform = client.create_platform_component(**platform_kwargs)
+        if platform is None:
+            # create_platform_component's underlying _createPlatform swallows
+            # a Ctrl+C during the (long) platform build - it catches
+            # KeyboardInterrupt internally, prints its own "Process
+            # interrupted by user." and cancels the request server-side, but
+            # never re-raises, silently returning None instead of raising.
+            # Without this check that turns into a confusing, unrelated
+            # AttributeError on the next line (platform.update_desc); this
+            # gives a clear, actionable message instead.
+            raise Exception(f"Platform \"{name}\" creation returned no result - "
+                             "likely interrupted (e.g. Ctrl+C) or failed silently "
+                             f"during the build; see {self._buildLogPath or 'the console output above'}.")
         platform.update_desc(desc=name)
         self._writePlatformSourceDirManifest(platform, plt["hw_pf_dir"])
 
