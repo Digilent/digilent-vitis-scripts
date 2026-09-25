@@ -190,16 +190,19 @@ class _BuildWatchdog:
         while not self._stopEvent.wait(self.WARN_INTERVAL_SEC):
             elapsedSec += self.WARN_INTERVAL_SEC
             try:
-                procs = listVitisProcesses(environ.get("XILINX_VITIS", ""))
-                procsDesc = ", ".join(f"{name} (pid {pid})" for pid, name in procs) or "none found"
+                vitisRoot = environ.get("XILINX_VITIS", "")
+                allProcs = listVitisProcesses(vitisRoot)
+                staleProcs = listVitisProcesses(vitisRoot, _PROCESS_START_TIME)
+                staleDesc = ", ".join(f"{name} (pid {pid})" for pid, name in staleProcs) or "none"
+                ownProcs = [p for p in allProcs if p not in staleProcs]
+                ownDesc = ", ".join(f"{name} (pid {pid})" for pid, name in ownProcs) or "none found (may have crashed)"
             except Exception as e:
-                procsDesc = f"unavailable ({e})"
+                staleDesc = ownDesc = f"unavailable ({e})"
             LOG(f"WARNING: building {self._desc} has shown no progress for over "
                f"{elapsedSec // 60} minute(s). Vitis gives no live build progress, "
-               "so this MAY just be a slow build - but if this never finishes, a "
-               "leftover process from an earlier interrupted (Ctrl+C'd) run can be "
-               "holding a file lock/license checkout that silently blocks this run "
-               f"forever. Currently running Vitis-related process(es): {procsDesc}")
+               "so this MAY just be a slow build. Leftover process(es) from an "
+               f"EARLIER run (a likely cause of a genuine hang): {staleDesc}. This "
+               f"run's own Vitis backend, still alive: {ownDesc}.")
 
 class Workspace:
     """
