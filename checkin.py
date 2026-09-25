@@ -1025,10 +1025,15 @@ class Workspace:
                 # xsa (e.g. the originally imported design alongside a
                 # regenerated export copy); picking an arbitrary one (rglob
                 # order is not guaranteed) risks copying/correlating the
-                # wrong handoff. Reject rather than guess.
+                # wrong handoff. Reject rather than guess. Same as the
+                # zero-xsa branch above, an unbound platform never reaches
+                # processGatherFiles' own resolution failure path, so mark
+                # discovery as failed here too instead of silently
+                # dropping the platform while check-in still succeeds.
                 LOG(f"Platform \"{item}\" contains {len(archFile)} xsa files; "
                    f"cannot unambiguously determine its authoritative "
                    f"handoff, skipping it.")
+                self.bPlatformResolutionFailed = True
                 continue
             else:
                 # Populate with xsa files path.
