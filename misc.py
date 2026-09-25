@@ -432,7 +432,13 @@ def listVitisProcesses(vitisRoot : str = "", startedBefore : float = None) -> li
             f"Get-CimInstance Win32_Process | Where-Object {{ @({nameList}) -contains $_.Name }} | "
             "ForEach-Object { "
             "$created = ''; "
-            "if ($_.CreationDate) { $created = $_.CreationDate.ToString('o') }; "
+            # The round-trip "o" format emits 7 fractional-second digits,
+            # but the Vitis 2024.1 bundled Python (3.8) datetime.fromisoformat
+            # below only accepts 0, 3 or 6 - a 7-digit fraction raises
+            # ValueError there, silently skipping the startedBefore check
+            # and letting the current run's own just-started server be
+            # treated as "dangling". "ffffff" emits exactly 6 digits instead.
+            "if ($_.CreationDate) { $created = $_.CreationDate.ToString('yyyy-MM-ddTHH:mm:ss.ffffffK') }; "
             "\"$($_.ProcessId)|$($_.Name)|$($_.ExecutablePath)|$created\" }"
         )
         out = subprocess.run(
