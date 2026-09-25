@@ -1996,6 +1996,39 @@ class Workspace:
             if skip_unbound_platforms:
                 bound_platforms = self._getBoundPlatformNames(app_names, hw_platforms, repo_root)
 
+            # Compute "domains"/"domain_name"/"xpfm" for every platform
+            # up front (pure/no side effects - see _setPlatformDomainInfo),
+            # so every selected app's platform/domain mapping can be
+            # resolved and validated below BEFORE any platform is deleted
+            # or rebuilt. Without this, an app recording an unsupported OS
+            # or a CPU no longer present in the xsa would only be caught
+            # by _appHasValidMapping after the platform loop below had
+            # already mutated the workspace, making the "aborting before
+            # deleting any component" message below false.
+            for plt in hw_platforms.values():
+                self._setPlatformDomainInfo(client, plt)
+
+            # Validate every app that will be deleted-and-rebuilt (i.e. not
+            # handled in-place, see `incremental` above) BEFORE deleting any
+            # of them (platform or application): otherwise a later
+            # unresolvable app's failure is only discovered by
+            # _buildApplication after an earlier, previously working
+            # component has already been destroyed.
+            rebuild_apps = [
+                app_name for app_name in app_names
+                if not (selective and app_name not in apps)
+                and not (incremental and app_name in existing)
+                ]
+            unresolved_apps = [
+                app_name for app_name in rebuild_apps
+                if not self._appHasValidMapping(app_name, hw_platforms, repo_root)
+                ]
+            if unresolved_apps:
+                LOG(f"Aborting before deleting any component: application(s) "
+                   f"{unresolved_apps} could not be resolved to a platform/domain "
+                   f"(see prior log messages).")
+                return Workspace.FAILURE
+
             for xsa_path, plt in hw_platforms.items():
                 if selective and plt["name"] not in platforms:
                     # Not being rebuilt, but _buildApplication still needs
@@ -2020,26 +2053,6 @@ class Workspace:
                             LOG(f"Deleting existing component \"{stale_name}\" for rebuild...")
                             client.delete_component(name=stale_name)
                     self._buildPlatform(client, xsa_path, plt, repo_path)
-
-            # Validate every app that will be deleted-and-rebuilt (i.e. not
-            # handled in-place, see `incremental` above) BEFORE deleting any
-            # of them: otherwise a later unresolvable app's failure is only
-            # discovered by _buildApplication after an earlier, previously
-            # working component has already been destroyed.
-            rebuild_apps = [
-                app_name for app_name in app_names
-                if not (selective and app_name not in apps)
-                and not (incremental and app_name in existing)
-                ]
-            unresolved_apps = [
-                app_name for app_name in rebuild_apps
-                if not self._appHasValidMapping(app_name, hw_platforms, repo_root)
-                ]
-            if unresolved_apps:
-                LOG(f"Aborting before deleting any component: application(s) "
-                   f"{unresolved_apps} could not be resolved to a platform/domain "
-                   f"(see prior log messages).")
-                return Workspace.FAILURE
 
             all_apps_resolved = True
             for app_name in app_names:
