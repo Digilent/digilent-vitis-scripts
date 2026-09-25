@@ -1991,6 +1991,39 @@ class Workspace:
            f"\"{plt['name']}\"; refusing to rebuild it against a different CPU.")
         return None
 
+    def _isAppBoundToVersionSkippedXsa(self, app_name, comp_settings_path, repo_root) -> bool:
+        """
+        @Description
+        Check whether app_name's own recorded xsa reference (see
+        getAppPlatformXsa) is one _filterXsaFilesByVitisVersion skipped
+        for a version mismatch this run, as opposed to being unresolved
+        for any other reason (stale/typo'd reference, unsupported OS, a
+        CPU no longer on the platform, etc - see _appHasValidMapping).
+        Lets checkOutSF tell these apart: an app unresolved ONLY because
+        of an already-logged, well-understood version skip can be safely
+        excluded from this run alone, while every other kind of
+        unresolved app is unpredictable enough that it must still abort
+        the whole checkout before any component is deleted.
+
+        @Parameters
+        app_name: application folder name under `src` (unused directly,
+                 kept for symmetry/clarity with the other _resolveApp*
+                 helpers - no logging happens here).
+        comp_settings_path: absolute path to this app's comp-settings.json.
+        repo_root: absolute path to the parent repository (parent of `src`),
+                  the relative xsa path in comp-settings.json is anchored to.
+
+        @Returns
+        True only if app_name has a recorded xsa reference AND that exact
+        xsa was skipped by _filterXsaFilesByVitisVersion this run.
+        """
+        requested_xsa = self.getAppPlatformXsa(app_name, filepath=comp_settings_path)
+        if requested_xsa == "":
+            return False
+        requested_xsa_abs = self._normalizeXsaPathForCompare(
+            path.join(repo_root, requested_xsa))
+        return requested_xsa_abs in self._versionSkippedXsaPaths
+
     def _appHasValidMapping(self, app_name, hw_platforms, repo_root) -> bool:
         """
         @Description
@@ -2433,11 +2466,49 @@ class Workspace:
                 app_name for app_name in rebuild_apps
                 if not self._appHasValidMapping(app_name, hw_platforms, repo_root)
                 ]
+            version_skipped_app_names = set()
             if unresolved_apps:
-                LOG(f"Aborting before deleting any component: application(s) "
-                   f"{unresolved_apps} could not be resolved to a platform/domain "
-                   f"(see prior log messages).")
-                return Workspace.FAILURE
+                comp_settings_paths = {
+                    app_name: (repo_root + sep + "src" + sep + app_name +
+                              sep + Workspace.COMP_SETTINGS)
+                    for app_name in unresolved_apps
+                    }
+                non_version_skip_apps = [
+                    app_name for app_name in unresolved_apps
+                    if not self._isAppBoundToVersionSkippedXsa(
+                        app_name, comp_settings_paths[app_name], repo_root)
+                    ]
+                if non_version_skip_apps:
+                    # At least one app is unresolved for a reason OTHER
+                    # than an already-logged, well-understood version-
+                    # mismatch skip (e.g. a stale/typo'd xsa reference,
+                    # an unsupported OS, a CPU no longer on the
+                    # platform): this is unpredictable enough that
+                    # continuing to delete/rebuild other components
+                    # risks destroying previously-working ones only to
+                    # still fail overall, so abort before touching
+                    # anything, same as before.
+                    LOG(f"Aborting before deleting any component: application(s) "
+                       f"{non_version_skip_apps} could not be resolved to a platform/domain "
+                       f"(see prior log messages).")
+                    return Workspace.FAILURE
+                # Every unresolved app here is unresolved ONLY because
+                # its own xsa was cleanly skipped upfront for a version
+                # mismatch (see _filterXsaFilesByVitisVersion / the
+                # "references XSA ... version mismatch" message already
+                # logged above) - not a sign of a wider, unpredictable
+                # problem. Let the checkout continue for every OTHER
+                # app/platform instead of aborting before even starting.
+                # These app(s) are excluded from the rebuild loop below
+                # (see version_skipped_app_names) rather than merely
+                # left to fail there again, so any of their EXISTING
+                # components are left untouched instead of being deleted
+                # only to never get rebuilt. The overall result is still
+                # FAILURE (see all_apps_resolved below), just only after
+                # everything buildable has actually been built.
+                version_skipped_app_names = set(unresolved_apps)
+                LOG(f"Continuing checkout without application(s) {unresolved_apps}: "
+                   f"each is bound to an xsa skipped for a Vitis version mismatch.")
 
             for xsa_path, plt in hw_platforms.items():
                 if selective and plt["name"] not in platforms:
@@ -2467,6 +2538,19 @@ class Workspace:
             all_apps_resolved = True
             for app_name in app_names:
                 if selective and app_name not in apps:
+                    continue
+                if app_name in version_skipped_app_names:
+                    # Don't touch any existing component for this app:
+                    # it's already known (see above) to be unresolvable
+                    # this run only because its own xsa was skipped for
+                    # a version mismatch, so deleting a possibly still-
+                    # good existing component here would destroy it
+                    # without any way to rebuild it this run.
+                    LOG(f"Skipping application \"{app_name}\": bound to an "
+                       "xsa skipped for a Vitis version mismatch (see "
+                       "prior log messages); leaving any existing "
+                       "component untouched.")
+                    all_apps_resolved = False
                     continue
                 if incremental and app_name in existing:
                     self._rebuildApplicationInPlace(client, app_name, repo_root)
