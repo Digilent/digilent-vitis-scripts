@@ -879,11 +879,19 @@ class Workspace:
             # multi-processor xsa) alongside the xsa correlation, so
             # checkout.py rebuilds it against the same domain instead of
             # whichever processor its own HW metadata extraction happens
-            # to expose first (see checkout.py's getAppTargetProc).
+            # to expose first (see checkout.py's getAppTargetProc). "os" is
+            # also recorded (even though only "standalone" ever reaches
+            # this point today, see the appOs check above) so checkout.py
+            # can independently refuse to silently rebuild an app as
+            # "standalone" if a comp-settings.json ever reaches it with a
+            # different recorded OS (e.g. checked in by an older/patched
+            # checkin.py, or a legacy check-in predating this guard),
+            # instead of relying solely on this check-in-time rejection.
             cpuInstance = dJsonData.get("cpuInstance", "")
             self.cfgWs.utilCfgWs.dPltAppCorr[appName] = {
                 "xsa": relPathPlt,
-                "cpu_instance": cpuInstance
+                "cpu_instance": cpuInstance,
+                "os": appOs
                 }
             # Resolve the canonical build file directly at
             # <app-dir>/src/CMakeLists.txt instead of an app-wide recursive

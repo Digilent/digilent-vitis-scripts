@@ -346,6 +346,43 @@ class Workspace:
                 return value["cpu_instance"]
         return ""
 
+    def getAppOs(self,
+               appname : str,
+               filepath=""
+               ) -> str:
+        """
+        @Description
+        Read the OS this application was checked in against (see
+        checkin.py's processGatherFiles, which stores it as "os" alongside
+        "xsa"/"cpu_instance" in the same platform/xsa correlation entry read
+        by getAppPlatformXsa/getAppTargetProc). checkin.py itself already
+        refuses to check in a non-"standalone" application, but this is
+        read back independently so _resolveAppDomain can refuse to silently
+        rebuild such an app against a "standalone" domain (see _buildPlatform,
+        which never creates anything else) if a comp-settings.json ever
+        reaches checkout.py with a different recorded OS regardless (e.g.
+        checked in by an older/patched checkin.py, or a legacy check-in
+        predating this guard), instead of relying solely on the check-in
+        side rejection. Older comp-settings.json files (checked in before
+        this was tracked) simply won't have it; those are assumed
+        "standalone", matching checkin.py's own default for the same key.
+
+        @Parameters
+        appname: app name, used only for logging context.
+        filepath: comp-setting.json path.
+
+        @Returns
+        The recorded OS name (e.g. "standalone", "linux"), or "standalone"
+        if none is recorded.
+        """
+        dJsonStruct = JSONDecoder().decode(open(filepath).read())
+        for key, value in dJsonStruct.items():
+            if key.startswith("USER_"):
+                continue
+            if isinstance(value, dict) and isinstance(value.get("os"), str) and value["os"] != "":
+                return value["os"]
+        return "standalone"
+
     def quietBuild(self, buildFn, desc="") -> None:
         """
         @Description
@@ -1084,8 +1121,10 @@ class Workspace:
             # CMake toolchain test when a second platform is built in the same
             # workspace/session.
             # TODO: add real "linux" (and other non-"standalone") OS/domain
-            # support here - checkin.py currently rejects any such app, so
-            # this only ever needs to build "standalone" domains for now.
+            # support here - checkin.py currently rejects any such app (and
+            # _resolveAppDomain independently refuses to resolve one, as a
+            # second guard against a legacy/older check-in), so this only
+            # ever needs to build "standalone" domains for now.
             domain = platform.add_domain(
                 cpu=target_proc,
                 os="standalone",
@@ -1434,6 +1473,14 @@ class Workspace:
         instead of silently rebuilding against a different CPU. Falls
         back to the platform's default domain only when none was recorded.
 
+        Also refuses to resolve any app whose recorded OS (see getAppOs)
+        is not "standalone": _buildPlatform only ever creates "standalone"
+        domains, and checkin.py only ever checks in a "standalone" app, so
+        anything else reaching here (e.g. a legacy check-in predating that
+        guard) would otherwise be silently rebuilt against a "standalone"
+        domain/template instead of its actual target - see the reasoning
+        in checkin.py's processGatherFiles.
+
         @Parameters
         app_name: application folder name under `src`, used only for logging.
         comp_settings_path: absolute path to this app's comp-settings.json.
@@ -1442,8 +1489,17 @@ class Workspace:
 
         @Returns
         The domain name to bind `app_name` to, or None if a nonempty
-        recorded processor is no longer available on this platform.
+        recorded processor is no longer available on this platform, or if
+        the recorded OS is not "standalone".
         """
+        app_os = self.getAppOs(app_name, filepath=comp_settings_path)
+        if app_os != "standalone":
+            LOG(f"Application \"{app_name}\" was checked in with OS "
+               f"\"{app_os}\", which checkout.py cannot rebuild (only "
+               f"\"standalone\" bare-metal domains are reconstructed); "
+               f"refusing to silently rebuild it against a \"standalone\" "
+               f"domain instead.")
+            return None
         target_proc = self.getAppTargetProc(app_name, filepath=comp_settings_path)
         if target_proc == "":
             return plt["domain_name"]
