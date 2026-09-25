@@ -93,11 +93,17 @@ if defined INSTALL_PATH (
     rem which all also try the parent of the configured path. Without this,
     rem such a path misses the valid install below it and falls through to
     rem the (much less targeted) drive-wide scan below.
+    rem This whole "if defined INSTALL_PATH ( ... )" is a single parenthesized
+    rem block, so a plain "%INSTALL_PARENT%" below would be expanded once at
+    rem parse time -- before the "set" above even runs -- and would always
+    rem see it as empty/undefined, silently skipping this fallback. Delayed
+    rem expansion ("!INSTALL_PARENT!", enabled above) re-reads the variable
+    rem at execution time instead, the same fix used for "!ERRORLEVEL!" below.
     if not defined VITIS_ROOT (
         for %%P in ("%INSTALL_PATH%\..") do set "INSTALL_PARENT=%%~fP"
     )
-    if not defined VITIS_ROOT if defined INSTALL_PARENT if exist "%INSTALL_PARENT%\%VERSION%\Vitis\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PARENT%\%VERSION%\Vitis"
-    if not defined VITIS_ROOT if defined INSTALL_PARENT if exist "%INSTALL_PARENT%\Vitis\%VERSION%\bin\vitis.bat" set "VITIS_ROOT=%INSTALL_PARENT%\Vitis\%VERSION%"
+    if not defined VITIS_ROOT if defined INSTALL_PARENT if exist "!INSTALL_PARENT!\%VERSION%\Vitis\bin\vitis.bat" set "VITIS_ROOT=!INSTALL_PARENT!\%VERSION%\Vitis"
+    if not defined VITIS_ROOT if defined INSTALL_PARENT if exist "!INSTALL_PARENT!\Vitis\%VERSION%\bin\vitis.bat" set "VITIS_ROOT=!INSTALL_PARENT!\Vitis\%VERSION%"
 )
 for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
     for %%N in (AMDDesignTools Xilinx) do (
