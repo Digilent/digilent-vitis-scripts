@@ -59,7 +59,7 @@ for development of `projects`.
    To recreate the workspace, enter the following command into the Vitis Commandline Tool,
    specifying the absolute path to the checkout script:
 
-   `run <path-to-scripts-repo>checkout.py`
+   `run <path-to-scripts-repo>\checkout.py`
 
    This process will populate the workspace with projects containing sources
    from the parent repository's `src` folder, configure those projects, and fully build them.
@@ -72,7 +72,7 @@ for development of `projects`.
    If this is the chosen method, then it will be necessary to give absolute path to the
    `checkout.py` file, not relative:
 
-   `vitis -s <path-to-scripts-repo>checkout.py`
+   `vitis -s <path-to-scripts-repo>\checkout.py`
 
    Alternatively, you can change the Vitis Unified IDE current working directory to the
    branch's `sw` submodule and then specify the path to the checkout script as
@@ -110,14 +110,14 @@ for development of `projects`.
    To backup the workspace, enter the following command into the Vitis Console, giving it the
    absolute path to the checkin script:
 
-   `run <path-to-scripts-repo>checkin.py`
+   `run <path-to-scripts-repo>\checkin.py`
 
    The above functionality can be reproduced from Vitis Unified IDE by launching the terminal from
    Terminal -> New Terminal which uses the default command line executable from the OS. If
    this is the chosen method, then it will be necessary to give absolute path to the `checkin.py`
    file, not relative:
 
-   `vitis -s <path-to-scripts-repo>checkin.py`
+   `vitis -s <path-to-scripts-repo>\checkin.py`
 
    Alternatively, you can change the Vitis Unified IDE current working directory to the
    branch's `sw` submodule and then specify the path to the checkin script as
@@ -176,7 +176,10 @@ directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
 `checkout.py` flags (combinable): `--platform <platform-name>` (repeatable),
 `--app <app-name>` (repeatable), `--skip-unbound-platforms`, `--incremental`
 (only meaningful together with `--platform`/`--app`), `--allow-process-cleanup`.
-`checkin.py` takes no flags. Replace `<version>` with the installed Vitis
+`checkin.py` flags (combinable): `--port <port-number>` (attach to/start the
+Vitis server on this port; blank/omitted auto-selects one), `--ip
+<ip-address>` (attach to/start the server on this host; defaults to
+localhost). Replace `<version>` with the installed Vitis
 version (e.g. `2025.2`) and `<install-path>` with a specific install root to
 search first. `-Script`/`-s` is always resolved relative to the launcher's
 own directory, so it takes a bare `checkout.py`/`checkin.py`, never prefixed
