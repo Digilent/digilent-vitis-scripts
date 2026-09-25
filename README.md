@@ -148,12 +148,15 @@ from `sw`, or from anywhere else works the same way.
 useful when multiple versions/vendors are installed side-by-side.
 `-Script`/`-s` is the script to run; if omitted, only the Vitis
 install/python/PYTHONPATH info is printed (no script runs) - useful to
-sanity-check what a given `-v`/`-i` resolves to. Any remaining arguments
-are forwarded to the script. `--stop-dangling` looks for leftover Vitis
-processes (e.g. a `.lock` file's server left running after the IDE was
-closed, see **Special Note** above) and stops them before proceeding -
-scoped to processes actually launched from the resolved Vitis install (an
-unrelated `java`/`eclipse` process elsewhere on the machine is left alone).
+sanity-check what a given `-v`/`-i` resolves to. The long `-Version`/
+`-InstallPath`/`-Script` names are PowerShell-only (`_vitis.ps1`);
+`_vitis.bat`/`_vitis.sh` only parse the short `-v`/`-i`/`-s` forms. Any
+remaining arguments are forwarded to the script. `--stop-dangling` looks
+for leftover Vitis processes (e.g. a `.lock` file's server left running
+after the IDE was closed, see **Special Note** above) and stops them
+before proceeding - scoped to processes actually launched from the
+resolved Vitis install (an unrelated `java`/`eclipse` process elsewhere
+on the machine is left alone).
 
 Examples (run from any directory):
 
