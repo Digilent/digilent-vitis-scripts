@@ -1010,6 +1010,15 @@ class Workspace:
             # Get handoff ~ can be more;
             archFile = list(Path(pItem).rglob(SrcFilesWS.HOFF_HDL))
             if len(archFile) == UtilityWS.EMPTY_BUFFER:
+                # A validated "PLATFORM" component with no discoverable xsa
+                # cannot be checked in at all, bound to an app or not: an
+                # unbound platform never goes through processGatherFiles'
+                # own resolution failure path, so without this check-in
+                # would silently drop it and still report success. Record
+                # the failure and abort instead of skipping quietly.
+                LOG(f"Platform \"{item}\" has no discoverable xsa file; "
+                   f"cannot check it in.")
+                self.bPlatformResolutionFailed = True
                 continue
             elif len(archFile) > 1:
                 # A real platform can legitimately contain more than one
