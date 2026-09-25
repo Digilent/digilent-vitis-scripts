@@ -27,4 +27,5 @@ find "$script_dir" -name '.git' -prune -o -type f ! -name 'cleanup.sh'  \
 			 ! -name 'LICENSE'     \
 			 ! -name 'README.md'   \
 			 ! -name '.gitignore'  \
+			 ! -name '.keep'       \
 			   -exec rm -rf {} +
