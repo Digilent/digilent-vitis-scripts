@@ -1326,6 +1326,31 @@ class Workspace:
     def _buildPlatform(self, client, xsa_path, plt, repo_path) -> None:
         """
         @Description
+        Thin wrapper around _buildPlatformImpl that keeps a _BuildWatchdog
+        running for its ENTIRE duration, not just the final quietBuild(
+        platform.build) call at the end. The observed hang (platform
+        creation/domain-add streaming "Generating Export directory" and
+        never returning) happens INSIDE client.create_platform_component()/
+        platform.add_domain() themselves - both blocking, unfiltered SDK
+        calls made before quietBuild is ever reached - so a watchdog placed
+        only inside quietBuild (see its own docstring) never even started
+        for this specific hang.
+
+        @Parameters
+        client: Vitis client obj returned by create_client().
+        xsa_path: absolute path to this platform's xsa file.
+        plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms).
+        repo_path: absolute path to a custom embeddedsw checkout (see
+                  checkOutSF's esw_repo), or None to use whichever
+                  embeddedsw copy ships bundled with the Vitis install.
+                  Only used for zynqmp platforms.
+        """
+        with _BuildWatchdog(f"platform \"{plt['name']}\""):
+            self._buildPlatformImpl(client, xsa_path, plt, repo_path)
+
+    def _buildPlatformImpl(self, client, xsa_path, plt, repo_path) -> None:
+        """
+        @Description
         Create, configure and build ONE platform component from an already
         HSI-inspected entry (see _extractPlatformMetadata), including the
         ZynqMP FSBL domain/application when needed (see _buildZynqMPFsbl).
