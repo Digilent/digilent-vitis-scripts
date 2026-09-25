@@ -1535,7 +1535,7 @@ class Workspace:
         hw_pf_dir: absolute path to the platform's original containing
                   folder under `src` (see _discoverAppsAndPlatforms).
         """
-        manifest_path = path.join(platform.component_location, ".digilent_source_dir")
+        manifest_path = path.join(platform.project_location, ".digilent_source_dir")
         with open(manifest_path, "w") as f:
             f.write(path.basename(hw_pf_dir) + "\n")
 
