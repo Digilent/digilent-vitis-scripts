@@ -175,7 +175,9 @@ directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
 
 `checkout.py` flags (combinable): `--platform <platform-name>` (repeatable),
 `--app <app-name>` (repeatable), `--skip-unbound-platforms`, `--incremental`
-(only meaningful together with `--platform`/`--app`), `--allow-process-cleanup`.
+(only meaningful together with `--platform`/`--app`), `--allow-process-cleanup`,
+`-y`/`--assume-yes` (skip the confirmation prompt before a full checkout wipes
+a non-empty workspace; use for unattended/CI runs).
 `checkin.py` flags (combinable): `--port <port-number>` (attach to/start the
 Vitis server on this port; blank/omitted auto-selects one), `--ip
 <ip-address>` (attach to/start the server on this host; defaults to
