@@ -33,7 +33,8 @@ import xsdb
 import threading
 import zipfile
 from xml.etree import ElementTree
-from misc import (LOG, stopDanglingVitisProcesses, listVitisProcesses)
+from misc import (LOG, stopDanglingVitisProcesses, listVitisProcesses,
+                   stopVitisProcessesByPid)
 
 # Extensions _pruneStaleFiles treats as genuine (prunable) source files when
 # scanning an app's own top-level "src" dir, where sources and Vitis-
@@ -157,10 +158,11 @@ class _BuildLogFilter:
 class _BuildWatchdog:
     """
     @Description
-    Background thread used only to log periodic diagnostics while a build
-    step (see Workspace.quietBuild) shows no CONSOLE output for a while.
-    Vitis's own build log is extremely verbose but almost entirely filtered
-    out by _BuildLogFilter (only error/warning/"build finished" lines pass
+    Background thread used to log periodic diagnostics while a build step
+    (see Workspace.quietBuild) shows no CONSOLE output for a while, and
+    optionally recover from a genuine hang automatically. Vitis's own
+    build log is extremely verbose but almost entirely filtered out by
+    _BuildLogFilter (only error/warning/"build finished" lines pass
     through to the terminal), so a real multi-minute step (e.g. ZynqMP
     platform export/DTS generation) that is still genuinely working looks
     IDENTICAL, from the console alone, to an actual hang (e.g. a leftover
@@ -180,14 +182,24 @@ class _BuildWatchdog:
     stalled does this actually warn, since that combination (no console
     output AND no file writes) is what a genuine hang looks like.
 
-    This never cancels/times out the build itself (not safely doable for
-    a blocking gRPC call without risking a half-built component).
+    This never cancels/times out the build itself directly (not safely
+    doable for a blocking gRPC call): with auto_recover=True, once a
+    genuine hang is confirmed it instead force-kills THIS run's own live
+    Vitis backend process(es) (never a leftover from an earlier run, nor
+    an unrelated concurrent session - see the ownProcs computation
+    below), which breaks the underlying gRPC channel and makes the
+    blocking SDK call in the caller's thread (e.g. platform.build())
+    raise an exception soon after, instead of hanging forever - letting
+    the caller (see Workspace._buildPlatform) catch that and retry once
+    in a fresh Vitis session.
     """
     WARN_INTERVAL_SEC = 180
 
-    def __init__(self, desc, ws_path=""):
+    def __init__(self, desc, ws_path="", auto_recover=False):
         self._desc = desc
         self._wsPath = ws_path
+        self._autoRecover = auto_recover
+        self.killedForRecovery = False
         self._stopEvent = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -239,10 +251,27 @@ class _BuildWatchdog:
                 allProcs = listVitisProcesses(vitisRoot)
                 staleProcs = listVitisProcesses(vitisRoot, _PROCESS_START_TIME)
                 staleDesc = ", ".join(f"{name} (pid {pid})" for pid, name in staleProcs) or "none"
+                # Never a leftover from an earlier run (staleProcs, excluded
+                # above) nor some unrelated concurrent session (this run's
+                # OWN process list, scoped to vitisRoot - see
+                # listVitisProcesses) - safe to force-kill below without
+                # risking another session's work.
                 ownProcs = [p for p in allProcs if p not in staleProcs]
                 ownDesc = ", ".join(f"{name} (pid {pid})" for pid, name in ownProcs) or "none found (may have crashed)"
             except Exception as e:
+                ownProcs = []
                 staleDesc = ownDesc = f"unavailable ({e})"
+            if self._autoRecover and ownProcs:
+                LOG(f"WARNING: building {self._desc} has shown no console output AND no "
+                   f"workspace file activity for over {elapsedSec // 60} minute(s) - this "
+                   "looks like a genuine hang, not just a slow build. Force-stopping this "
+                   f"run's own stuck Vitis backend ({ownDesc}) to attempt automatic "
+                   "recovery (a single retry in a fresh Vitis session)...")
+                stopped = stopVitisProcessesByPid(ownProcs)
+                self.killedForRecovery = True
+                LOG(f"Stopped process(es) {stopped} for recovery; waiting for the "
+                   "interrupted build call to return control...")
+                return
             LOG(f"WARNING: building {self._desc} has shown no console output AND no "
                f"workspace file activity for over {elapsedSec // 60} minute(s) - this "
                "looks like a genuine hang, not just a slow build. Leftover process(es) "
@@ -1500,7 +1529,7 @@ class Workspace:
         platform.set_fsbl_elf(path=fsbl_app.component_location + sep + "build" + sep + f"{fsbl_app_name}.elf")
         self.quietBuild(platform.build, f"platform \"{name}\" (with fsbl elf)")
 
-    def _buildPlatform(self, client, xsa_path, plt, repo_path) -> None:
+    def _buildPlatform(self, client, xsa_path, plt, repo_path):
         """
         @Description
         Thin wrapper around _buildPlatformImpl that keeps a _BuildWatchdog
@@ -1513,6 +1542,16 @@ class Workspace:
         only inside quietBuild (see its own docstring) never even started
         for this specific hang.
 
+        The watchdog runs with auto_recover=True: once it confirms a
+        genuine hang (no console output AND no workspace file activity),
+        it force-stops this run's own stuck Vitis backend itself, which
+        makes the blocking call above raise instead of hanging forever.
+        That failure is caught here (ONLY when caused by our own recovery
+        kill - watchdog.killedForRecovery - any other failure is still
+        raised as before) and this platform's build is retried exactly
+        once, from scratch, in a freshly started Vitis session bound to
+        the SAME (already-prepared) workspace.
+
         @Parameters
         client: Vitis client obj returned by create_client().
         xsa_path: absolute path to this platform's xsa file.
@@ -1521,9 +1560,60 @@ class Workspace:
                   checkOutSF's esw_repo), or None to use whichever
                   embeddedsw copy ships bundled with the Vitis install.
                   Only used for zynqmp platforms.
+
+        @Returns
+        The Vitis client to use for ALL subsequent calls: normally the
+        same `client` passed in, but a NEW client object if automatic hang
+        recovery had to recreate the Vitis session - callers MUST replace
+        their own reference with this return value, since the original
+        `client` may now point at a dead/killed session.
         """
-        with _BuildWatchdog(f"platform \"{plt['name']}\"", self._wsPath):
+        watchdog = _BuildWatchdog(f"platform \"{plt['name']}\"", self._wsPath, auto_recover=True)
+        try:
+            with watchdog:
+                self._buildPlatformImpl(client, xsa_path, plt, repo_path)
+            return client
+        except Exception as e:
+            if not watchdog.killedForRecovery:
+                raise
+            LOG(f"Platform \"{plt['name']}\" build failed ({e}) after this run's "
+               "own Vitis backend was force-stopped for a detected genuine "
+               "hang; starting a fresh Vitis session and retrying this "
+               "platform once...")
+
+        # This run's own backend was just force-killed above (not an
+        # ambiguous "maybe another session owns it" guess - see
+        # _setWorkspaceWithRetry), so any lock file it left behind is
+        # known-stale and safe to clear unconditionally, regardless of
+        # self._allowProcessCleanup (which only governs the ambiguous
+        # dangling-process case).
+        lock_path = path.join(self._wsPath, "_ide", ".wsdata", ".lock")
+        if path.isfile(lock_path):
+            try:
+                remove(lock_path)
+            except OSError as lock_err:
+                LOG(f"Failed to remove stale workspace lock file {lock_path} "
+                   f"after recovery: {lock_err}")
+
+        dispose()
+        client = create_client()
+        self._setWorkspaceWithRetry(client, self._wsPath)
+        # The failed attempt may have partially created this platform (and/
+        # or its zynqmp FSBL sibling) before hanging - delete any such
+        # remnant first, else create_platform_component below fails with
+        # "project ...\<name> already exists".
+        existing = {c["name"] for c in client.list_components()}
+        for stale_name in (plt["name"], f"{plt['name']}_FSBL"):
+            if stale_name in existing:
+                LOG(f"Deleting partially-built component \"{stale_name}\" before retry...")
+                client.delete_component(name=stale_name)
+
+        # No auto_recover on the retry: a SECOND genuine hang on the same
+        # platform is treated as a real, unrecoverable failure rather than
+        # retried indefinitely.
+        with _BuildWatchdog(f"platform \"{plt['name']}\" (retry)", self._wsPath):
             self._buildPlatformImpl(client, xsa_path, plt, repo_path)
+        return client
 
     def _buildPlatformImpl(self, client, xsa_path, plt, repo_path) -> None:
         """
@@ -2533,7 +2623,7 @@ class Workspace:
                         if stale_name in existing:
                             LOG(f"Deleting existing component \"{stale_name}\" for rebuild...")
                             client.delete_component(name=stale_name)
-                    self._buildPlatform(client, xsa_path, plt, repo_path)
+                    client = self._buildPlatform(client, xsa_path, plt, repo_path)
 
             all_apps_resolved = True
             for app_name in app_names:

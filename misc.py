@@ -548,9 +548,32 @@ def stopDanglingVitisProcesses(vitisRoot : str = "", startedBefore : float = Non
     @Returns
     list of pids that were successfully signaled to stop.
     """
+    return stopVitisProcessesByPid(listVitisProcesses(vitisRoot, startedBefore), force)
+
+
+def stopVitisProcessesByPid(procs : list, force : bool = True) -> list:
+    """
+    @Description
+    Terminate a caller-supplied list of (pid, name) tuples (as returned by
+    listVitisProcesses), regardless of when they started - unlike
+    stopDanglingVitisProcesses, which only ever targets processes started
+    BEFORE the calling script's own run (see its startedBefore parameter)
+    and so can never be used to recover from a genuine hang in the
+    CURRENT run's own still-alive Vitis backend. Split out of
+    stopDanglingVitisProcesses so both call sites share one taskkill/
+    SIGKILL implementation instead of duplicating it.
+
+    @Parameters
+    procs: list of (pid : int, name : str) tuples to terminate.
+    force: True uses `taskkill /F` / SIGKILL, False asks nicely first
+           (`taskkill` without /F / SIGTERM).
+
+    @Returns
+    list of pids that were successfully signaled to stop.
+    """
     stopped = []
     isWin = platform.system() == "Windows"
-    for pid, name in listVitisProcesses(vitisRoot, startedBefore):
+    for pid, name in procs:
         try:
             if isWin:
                 cmd = ["taskkill", "/PID", str(pid)]
@@ -568,7 +591,6 @@ def stopDanglingVitisProcesses(vitisRoot : str = "", startedBefore : float = Non
         except Exception as err:
             LOG(f"Failed to stop process {name} (pid={pid}): {err}")
     return stopped
-
 
 
 def updatePlatformXsa(platformComp, xsaPath : str) -> bool:
