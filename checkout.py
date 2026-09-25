@@ -27,6 +27,7 @@ from os import (path, walk, listdir, remove,
                 sep, makedirs, chmod, environ)
 from stat import S_IWRITE
 from tempfile import mkdtemp
+from hashlib import sha256
 import hsi
 import xsdb
 from misc import (LOG, stopDanglingVitisProcesses)
@@ -784,6 +785,82 @@ class Workspace:
         self._buildLogPath = path.join(ws_path, "checkout_build.log")
         LOG(f"Reusing existing Vitis workspace {client.get_workspace()} (selective rebuild).")
 
+    def _hashFileContents(self, filepath) -> str:
+        """
+        @Description
+        Compute a sha256 hex digest of filepath's contents, streamed in
+        chunks so even a large .xsa never needs to be loaded into memory
+        whole. Used only for content-based duplicate detection (see
+        _dedupeXsaFilesByContent), not for anything security-sensitive.
+
+        @Parameters
+        filepath: absolute path to the file to hash.
+
+        @Returns
+        Hex digest string.
+        """
+        digest = sha256()
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _dedupeXsaFilesByContent(self, xsa_files) -> list:
+        """
+        @Description
+        Collapse byte-identical .xsa files discovered in more than one
+        directory down to a single, canonical copy, so a stale duplicate
+        left behind under an old/legacy source directory (e.g. a prior
+        per-app "<app>_hw_pf" layout, superseded by a dedicated per-platform
+        directory) never becomes its own independent platform to build.
+        Without this, _discoverAppsAndPlatforms' own name-collision
+        disambiguation would instead treat every duplicate as a distinct
+        platform with a synthesized name (e.g. "dir_platform"), each
+        requiring a full, separately time-consuming HSI-extract + build for
+        content that is otherwise already covered by the canonical copy.
+
+        Only exact content duplicates are collapsed: two xsa's that merely
+        share a stem/name but differ in content (legitimate distinct
+        variants) are untouched here and still handled by the existing
+        per-directory collision-disambiguation logic below.
+
+        When a hash has more than one path, the one whose containing
+        directory's basename matches the xsa's own stem (the standard
+        one-platform-per-directory layout, see this method's docstring
+        context) is kept as canonical; if none match that pattern, the
+        first path in a stable sort order is kept instead, so the choice is
+        deterministic across runs rather than dependent on listdir order.
+
+        @Parameters
+        xsa_files: list of absolute paths to every discovered .xsa file.
+
+        @Returns
+        A new list with only one path kept per distinct content hash.
+        """
+        by_hash = {}
+        for xsa_path in xsa_files:
+            by_hash.setdefault(self._hashFileContents(xsa_path), []).append(xsa_path)
+
+        deduped = []
+        for content_hash, paths in by_hash.items():
+            if len(paths) == 1:
+                deduped.append(paths[0])
+                continue
+            canonical = None
+            for candidate in sorted(paths):
+                stem = path.splitext(path.basename(candidate))[0]
+                if path.basename(path.dirname(candidate)) == stem:
+                    canonical = candidate
+                    break
+            if canonical is None:
+                canonical = sorted(paths)[0]
+            dropped = [p for p in sorted(paths) if p != canonical]
+            LOG(f"Ignoring {len(dropped)} duplicate xsa file(s) with content "
+               f"identical to \"{canonical}\": {dropped}")
+            deduped.append(canonical)
+
+        return deduped
+
     def _discoverAppsAndPlatforms(self, src_root) -> tuple:
         """
         @Description
@@ -826,6 +903,8 @@ class Workspace:
                     xsa_files.append(filepath)
 
         LOG(f"Detected {len(app_names)} application(s): {app_names}")
+
+        xsa_files = self._dedupeXsaFilesByContent(xsa_files)
 
         xsa_by_dir = {}
         for xsa_path in xsa_files:
