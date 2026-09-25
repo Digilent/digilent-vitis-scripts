@@ -397,13 +397,17 @@ class SrcFilesWS:
         @Parameters
         lApps: ref to matrix with paths of files to be copied.
         """
-        if lApps is None or len(lApps) == UtilityWS.EMPTY_BUFFER:
+        if lApps is None:
             return SrcFilesWS.FAILURE
         pTemp = path.join(self.utilSFWs.pSubSw, SrcFilesWS.APP_SRCCODE)
         dimLsBldFl = len(self.lsBldFl)
         dimLsArchFl = len(self.lsArchFl)
-        # These lists should have been populated by now.
-        if (dimLsBldFl == UtilityWS.EMPTY_BUFFER or
+        # Fail only when there is truly nothing to check in: an unbound
+        # platform with no application (dimLsBldFl == 0) is an explicitly
+        # supported, valid workspace (see the independent platform-copy
+        # loop below), so it must not be rejected here before that loop
+        # ever gets to run.
+        if (dimLsBldFl == UtilityWS.EMPTY_BUFFER and
             dimLsArchFl == UtilityWS.EMPTY_BUFFER
             ):
             return SrcFilesWS.FAILURE
