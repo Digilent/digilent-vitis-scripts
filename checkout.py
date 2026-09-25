@@ -711,6 +711,17 @@ class Workspace:
         so neither codepath needs the user to manually stop dangling
         processes/delete the lock file before every run.
 
+        Also recovers from a distinct, unrelated failure mode: set_workspace
+        can reject ws_path with "Vitis IDE cannot recognize the workspace
+        version. Click 'Update' to initialize the workspace metadata." -
+        seen in practice even for a brand-new/just-wiped, completely empty
+        ws_path (which has no "_ide" metadata to recognize yet either), not
+        just a genuinely older-version workspace. Retrying the identical
+        set_workspace call would just fail again unchanged, so this calls
+        client.update_workspace(ws_path) instead - the client API's own
+        documented remedy (mirroring the IDE's own "Update" button) that
+        migrates/initializes the workspace metadata and sets it in one call.
+
         @Parameters
         client: Vitis client obj returned by create_client().
         ws_path: absolute path to the workspace directory to select.
@@ -722,6 +733,14 @@ class Workspace:
                 client.set_workspace(ws_path)
                 return
             except Exception as e:
+                if "recognize the workspace version" in str(e):
+                    LOG(f"Workspace {ws_path} needs its metadata initialized/"
+                       "migrated; retrying via update_workspace...")
+                    try:
+                        client.update_workspace(ws_path)
+                        return
+                    except Exception as update_err:
+                        LOG(f"update_workspace also failed for {ws_path}: {update_err}")
                 LOG(f"Attempt {attempt} to set workspace {ws_path} failed: {e}")
                 if attempt < max_try:
                     if self._allowProcessCleanup:
