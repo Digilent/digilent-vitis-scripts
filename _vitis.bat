@@ -149,7 +149,10 @@ if defined SCRIPT (
         echo Could not locate the python interpreter bundled with Vitis %VERSION%.
         exit /b 1
     )
-    set "PYTHONPATH=%VITIS_ROOT%\cli;%VITIS_ROOT%\cli\python-packages\win64;%VITIS_ROOT%\cli\proto;%VITIS_ROOT%\cli\python-packages\site-packages;%VITIS_ROOT%\scripts\python_pkg"
+    rem Append (not replace) any PYTHONPATH the caller already had set, same
+    rem as _vitis.sh/runWithVitisPython, so scripts depending on caller-
+    rem provided Python modules still work through this launcher.
+    set "PYTHONPATH=%VITIS_ROOT%\cli;%VITIS_ROOT%\cli\python-packages\win64;%VITIS_ROOT%\cli\proto;%VITIS_ROOT%\cli\python-packages\site-packages;%VITIS_ROOT%\scripts\python_pkg;%PYTHONPATH%"
     rem create_client()'s startServer falls back to a stale dev-build layout
     rem ("rigel-server\build\install\...") when XILINX_VITIS is unset, which
     rem does not exist in a real install; setting it here (scoped to this
