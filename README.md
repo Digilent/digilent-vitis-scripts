@@ -177,7 +177,9 @@ directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
 `--app <app-name>` (repeatable), `--skip-unbound-platforms`, `--incremental`
 (only meaningful together with `--platform`/`--app`), `--allow-process-cleanup`,
 `-y`/`--assume-yes` (skip the confirmation prompt before a full checkout wipes
-a non-empty workspace; use for unattended/CI runs).
+a non-empty workspace; use for unattended/CI runs), `--esw-repo <path>`
+(optional; overrides the embeddedsw copy bundled with Vitis, used for zynqmp
+platforms' FSBL build - omit it to use that bundled copy).
 `checkin.py` flags (combinable): `--port <port-number>` (attach to/start the
 Vitis server on this port; blank/omitted auto-selects one), `--ip
 <ip-address>` (attach to/start the server on this host; defaults to
