@@ -132,67 +132,72 @@ for development of `projects`.
 
 ## Running Scripts Without Vitis Environment Variables
 
-`_vitis.ps1` / `_vitis.bat` / `_vitis.sh` are OS-native launchers that mimic
-`vitis -s <script>` without requiring Vitis to be on the `PATH` or any Vitis
-environment variables to be set. They locate a Vitis install on disk (trying
-both the legacy `Xilinx` and the post-2025.1 `AMDDesignTools` root folder
-names, on all Windows drives or under `/opt`, `/tools`, `$HOME` on Linux),
-then invoke the bundled Python interpreter directly with the `PYTHONPATH`
-needed to `import vitis`. They can be run from any directory: the `-Script`
-argument is resolved relative to the launcher's own location if it is not
-already an absolute/rooted path, so calling them from the repository root,
-from `sw`, or from anywhere else works the same way.
+**Note:**
+*`_vitis.ps1` / `_vitis.bat` / `_vitis.sh` are OS-native launchers that mimic*
+*`vitis -s <script>` without Vitis on the `PATH` or any Vitis environment variables set.*
+*They can be run from any directory; a relative `-s` script path is resolved against the*
+*launcher's own location.*
 
-`-Version`/`-v` selects which installed Vitis version to use (e.g. `2025.2`).
-`-InstallPath`/`-i` can be given to search a specific install root first,
-useful when multiple versions/vendors are installed side-by-side.
-`-Script`/`-s` is the script to run; if omitted, only the Vitis
-install/python/PYTHONPATH info is printed (no script runs) - useful to
-sanity-check what a given `-v`/`-i` resolves to. The long `-Version`/
-`-InstallPath`/`-Script` names are PowerShell-only (`_vitis.ps1`);
-`_vitis.bat`/`_vitis.sh` only parse the short `-v`/`-i`/`-s` forms. Any
-remaining arguments are forwarded to the script. `--stop-dangling` looks
-for leftover Vitis processes (e.g. a `.lock` file's server left running
-after the IDE was closed, see **Special Note** above) and stops them
-before proceeding - scoped to processes actually launched from the
-resolved Vitis install (an unrelated `java`/`eclipse` process elsewhere
-on the machine is left alone).
+1. Pick the launcher matching your OS: `_vitis.ps1` or `_vitis.bat` on Windows,
+   `_vitis.sh` on Linux.
 
-Examples (run from any directory):
+2. The launcher locates a Vitis install on disk (legacy `Xilinx` and post-2025.1
+   `AMDDesignTools` root folders; all Windows drives, or `/opt`, `/tools`, `$HOME` on Linux)
+   and runs the bundled Python interpreter directly, with the `PYTHONPATH` needed to
+   `import vitis`.
 
-`.\scripts\_vitis.ps1 -v 2025.2 -s checkout.py`
+3. Pass the options below, in the shape `<launcher> -v <version> -s <script> [script-args]`:
 
-`scripts\_vitis.bat -v 2025.2 -s checkin.py`
+   * `-v` (`-Version`): Vitis version to use, e.g. `2025.2`.
+   * `-i` (`-InstallPath`): install root to search first, useful when several
+     versions/vendors are installed side by side.
+   * `-s` (`-Script`): script to run. If omitted, only the resolved Vitis, python and
+     `PYTHONPATH` info is printed, which is handy to check what `-v`/`-i` resolve to.
+   * `--stop-dangling`: stop leftover Vitis processes (e.g. a server still holding the
+     `.lock` file, see **Special Note** above) before running. Only processes launched from
+     the resolved Vitis install are stopped.
+   * Any remaining arguments are forwarded to the script.
 
-`./scripts/_vitis.sh -v 2025.2 -s checkout.py`
+   **Note:**
+   *The long names (`-Version`/`-InstallPath`/`-Script`) exist only in `_vitis.ps1`;*
+   *`_vitis.bat`/`_vitis.sh` accept just the short `-v`/`-i`/`-s` forms.*
 
-The same Vitis-locating/launching logic, plus process management and
-platform XSA update/upgrade helpers, is available for use from Python
-directly in `misc.py`: `findVitisRoot`, `findVitisPython`,
-`vitisPythonPathEntries`, `runWithVitisPython`, `listVitisProcesses`,
-`stopDanglingVitisProcesses`, and `updatePlatformXsa`.
+4. Examples (run from any directory):
+
+   `.\scripts\_vitis.ps1 -v 2025.2 -s checkout.py`
+
+   `scripts\_vitis.bat -v 2025.2 -s checkin.py`
+
+   `./scripts/_vitis.sh -v 2025.2 -s checkout.py`
+
+5. The same logic, plus process management and platform XSA update/upgrade helpers, is
+   available from Python in `misc.py`.
 
 ----
 
 ## Command Reference (copy/paste, replace placeholders as needed)
 
-`checkout.py` flags (combinable): `--platform <platform-name>` (repeatable),
-`--app <app-name>` (repeatable), `--skip-unbound-platforms`, `--incremental`
-(only meaningful together with `--platform`/`--app`), `--allow-process-cleanup`,
-`-y`/`--assume-yes` (skip the confirmation prompt before a full checkout wipes
-a non-empty workspace; use for unattended/CI runs), `--esw-repo <path>`
-(optional; overrides the embeddedsw copy bundled with Vitis, used for zynqmp
-platforms' FSBL build - omit it to use that bundled copy).
-`checkin.py` flags (combinable): `--port <port-number>` (attach to/start the
-Vitis server on this port; blank/omitted auto-selects one), `--ip
-<ip-address>` (attach to/start the server on this host; defaults to
-localhost). Replace `<version>` with the installed Vitis
-version (e.g. `2025.2`) and `<install-path>` with a specific install root to
-search first. `-Script`/`-s` is always resolved relative to the launcher's
-own directory, so it takes a bare `checkout.py`/`checkin.py`, never prefixed
-with `scripts\`/`scripts/` again.
+**Note:**
+*Replace `<version>` with the installed Vitis version (e.g. `2025.2`) and `<install-path>`*
+*with an install root to search first. `-s` is resolved relative to the launcher's own*
+*directory, so pass a bare `checkout.py`/`checkin.py`, never prefixed with `scripts\`.*
 
-Windows (`_vitis.bat`), run from the repository root:
+**`checkout.py` flags** (combinable):
+
+* `--platform <platform-name>`: rebuild only this platform, plus its apps (repeatable).
+* `--app <app-name>`: rebuild only this app, plus its platform (repeatable).
+* `--skip-unbound-platforms`: skip platforms no app references.
+* `--incremental`: rebuild in place; only with `--platform`/`--app`.
+* `--allow-process-cleanup`: allow stopping pre-existing Vitis processes.
+* `-y`/`--assume-yes`: skip the wipe confirmation prompt (CI/unattended).
+* `--esw-repo <path>`: custom embeddedsw checkout; default is the one bundled with Vitis.
+
+**`checkin.py` flags** (combinable):
+
+* `--port <port-number>`: Vitis server port; auto-selected if omitted.
+* `--ip <ip-address>`: Vitis server host; defaults to localhost.
+
+**Windows (`_vitis.bat`)**, run from the repository root:
 
 ```bat
 :: full wipe + rebuild of every platform/app
@@ -226,7 +231,7 @@ Windows (`_vitis.bat`), run from the repository root:
 .\scripts\_vitis.bat -v <version> -i <install-path> -s checkout.py
 ```
 
-Windows (`_vitis.ps1`), run from the repository root:
+**Windows (`_vitis.ps1`)**, run from the repository root:
 
 ```powershell
 # full wipe + rebuild of every platform/app
@@ -239,7 +244,7 @@ Windows (`_vitis.ps1`), run from the repository root:
 .\scripts\_vitis.ps1 -v <version> -StopDangling
 ```
 
-Linux (`_vitis.sh`), run from the repository root:
+**Linux (`_vitis.sh`)**, run from the repository root:
 
 ```bash
 # full wipe + rebuild of every platform/app
