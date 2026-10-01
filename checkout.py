@@ -1,18 +1,11 @@
 
 """
-    Company: Digilent RO
-    Engineers: rb & bs
-    Usage: Vitis projects
-    
-    @Description
-    This checkout.py has the same behavior
-    as the previous checkout.tcl. It creates
-    from sw -> src multiple applications into
-    sw -> ws.
-    
-    @Insights
-    Vitis v2024.1 has Python v3.8.3.
-    Vitis v2025.1 has Python v3.13.0.
+Company: Digilent RO
+Engineers: rb & bs
+Usage: Vitis projects
+
+@Description
+Recreate Vitis projects from sw -> src into sw -> ws.
 """
 from vitis import create_client, dispose
 import argparse
@@ -34,46 +27,26 @@ import threading
 import zipfile
 from xml.etree import ElementTree
 from misc import (LOG, stopDanglingVitisProcesses, listVitisProcesses,
-                   stopVitisProcessesByPid)
+                  stopVitisProcessesByPid)
 
-# Extensions _pruneStaleFiles treats as genuine (prunable) source files when
-# scanning an app's own top-level "src" dir, where sources and Vitis-
-# generated metadata (CMakeLists.txt, UserConfig.cmake, app.yaml, .clangd,
-# compile_commands.json, ...) live side by side; anything else with no
-# source counterpart is left untouched rather than guessed at.
+# Source extensions _pruneStaleFiles may prune at an app src top level.
 PRUNABLE_SRC_FILE_EXTENSIONS = frozenset({
     ".c", ".cc", ".cpp", ".cxx", ".c++", ".C", ".h", ".hh", ".hpp", ".hxx", ".s", ".S", ".ld"
     })
 
-# Captured once, at module load (before create_client() ever spawns a
-# server), so stopDanglingVitisProcesses can tell "a leftover from some
-# earlier, already-finished run" (safe to kill) apart from "a server THIS
-# very invocation just started" (never safe to kill - confirmed to
-# otherwise break the current gRPC channel mid-retry, see
-# _setWorkspaceWithRetry).
+# Captured before create_client() can spawn this run's backend process.
 _PROCESS_START_TIME = time.time()
 
 def GetMetadata(**kwargs):
     """
     @Description
-    Extract hardware family/target-processor metadata out of an XSA file
-    using the HSI Python API, so checkOutSF can pick the right domain/BSP
-    settings for a platform without any of it being hard-coded per project.
+    Extract hardware metadata from an XSA.
 
     @Parameters
-    kwargs:
-        xsa: path to the .xsa file to inspect.
-        open_xsa: set to a truthy value to actually open/parse the xsa; if
-                  falsy, an empty metadata dict is returned and no HSI call
-                  is made.
+    kwargs: accepts xsa and open_xsa.
 
     @Returns
-    ret_metadata with "target_proc" (the first supported processor found,
-    kept for callers/arch's that only ever use a single processor, e.g.
-    microblaze) and "target_procs" (every supported processor found, in
-    discovery order, so a multi-processor xsa - e.g. a ZynqMP exposing both
-    an A-class and an R5 - can get one domain per processor instead of only
-    ever the first one).
+    dict with arch, target_proc, and target_procs.
     """
     xsa = ""
     open_xsa = 0
@@ -99,24 +72,12 @@ def GetMetadata(**kwargs):
                 ret_metadata["arch"] = HwDesign.FAMILY
                 for proc in HwDesign.get_cells(hierarchical="true", filter="IP_TYPE==PROCESSOR"):
                     if proc.IP_NAME in SUPPORTED_PROCESSOR_IP_NAMES:
-                        # Use the cell's own instance name (e.g.
-                        # "microblaze_1"), not an assumed "<ip_name>_0":
-                        # a design can expose a differently-numbered or
-                        # multiple instances of the same IP.
                         proc_name = proc.NAME
-                        # Multi-processor XSAs (e.g. ZynqMP exposing both an
-                        # A-class and an R5) must yield one domain per
-                        # processor, not just the first found: keep scanning
-                        # instead of breaking, and record every one.
                         if proc_name not in ret_metadata["target_procs"]:
                             ret_metadata["target_procs"].append(proc_name)
                         if ret_metadata["target_proc"] == "":
                             ret_metadata["target_proc"] = proc_name
             finally:
-                # Release the HSI-side hardware design handle whether or
-                # not metadata extraction above succeeded, so a scratch
-                # xsa (see _extractXsaMetadataScratch) is never left open
-                # when its temp dir is removed right after this returns.
                 HwDesign.close()
         else:
             LOG("No XSA file was provided, hardware metadata cannot be extracted!")
@@ -128,22 +89,19 @@ def GetMetadata(**kwargs):
 class _BuildLogFilter:
     """
     @Description
-    File-like stdout replacement used only while a component builds. Vitis
-    itself prints its own, very verbose build log line-by-line (see
-    vitis._build); this class keeps that complete log in a single file
-    under the workspace, while only letting essential/error/warning lines
-    still reach the terminal, so an unattended checkout.py run (see
-    _vitis.ps1/.bat/.sh) stays readable.
+    Filter verbose Vitis build output.
     """
     ESSENTIAL_PATTERN = compile(r"error|warning|fail|build finished|build complete|\*\*\*",
                                 RegexFlag.IGNORECASE)
 
     def __init__(self, logFile, realStream):
+        """Store the wrapped log and terminal streams."""
         self._logFile = logFile
         self._real = realStream
         self._pending = ""
 
     def write(self, data):
+        """Mirror data to the log and selected terminal lines."""
         self._logFile.write(data)
         self._pending += data
         while "\n" in self._pending:
@@ -152,50 +110,19 @@ class _BuildLogFilter:
                 self._real.write(line + "\n")
 
     def flush(self):
+        """Flush both wrapped streams."""
         self._logFile.flush()
         self._real.flush()
 
 class _BuildWatchdog:
     """
     @Description
-    Background thread used to log periodic diagnostics while a build step
-    (see Workspace.quietBuild) shows no CONSOLE output for a while, and
-    optionally recover from a genuine hang automatically. Vitis's own
-    build log is extremely verbose but almost entirely filtered out by
-    _BuildLogFilter (only error/warning/"build finished" lines pass
-    through to the terminal), so a real multi-minute step (e.g. ZynqMP
-    platform export/DTS generation) that is still genuinely working looks
-    IDENTICAL, from the console alone, to an actual hang (e.g. a leftover
-    process from an earlier interrupted/Ctrl+C'd run - see
-    create_platform_component's swallowed KeyboardInterrupt - holding a
-    file lock/license checkout). Confirmed in practice: a "stuck" build
-    was still writing new files under the workspace minutes after this
-    watchdog's own warning fired, and finished successfully afterwards.
-
-    To tell these apart, this checks ws_path's most-recently-modified
-    file's mtime instead of relying on process presence alone (Vitis's own
-    backend process is legitimately always still alive either way, so it
-    alone cannot distinguish a hang from a slow build - see the process
-    snapshot printed by the WARNING path below). Recent file activity
-    means real (if silent) progress, logged as a reassuring INFO line
-    instead of an alarming one; only once file activity itself has
-    stalled does this actually warn, since that combination (no console
-    output AND no file writes) is what a genuine hang looks like.
-
-    This never cancels/times out the build itself directly (not safely
-    doable for a blocking gRPC call): with auto_recover=True, once a
-    genuine hang is confirmed it instead force-kills THIS run's own live
-    Vitis backend process(es) (never a leftover from an earlier run, nor
-    an unrelated concurrent session - see the ownProcs computation
-    below), which breaks the underlying gRPC channel and makes the
-    blocking SDK call in the caller's thread (e.g. platform.build())
-    raise an exception soon after, instead of hanging forever - letting
-    the caller (see Workspace._buildPlatform) catch that and retry once
-    in a fresh Vitis session.
+    Monitor quiet builds and log hang diagnostics.
     """
     WARN_INTERVAL_SEC = 180
 
     def __init__(self, desc, ws_path="", auto_recover=False):
+        """Initialize the watchdog state."""
         self._desc = desc
         self._wsPath = ws_path
         self._autoRecover = auto_recover
@@ -204,10 +131,12 @@ class _BuildWatchdog:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def __enter__(self):
+        """Start the watchdog thread."""
         self._thread.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Stop the watchdog thread."""
         self._stopEvent.set()
         self._thread.join(timeout=5)
         return False
@@ -215,9 +144,8 @@ class _BuildWatchdog:
     @staticmethod
     def _mostRecentMtime(ws_path):
         """
-        @Returns
-        The newest mtime (epoch seconds) of any file under ws_path, or
-        None if ws_path doesn't exist/is empty/is unreadable.
+        @Description
+        Return the newest file mtime under a workspace tree.
         """
         latest = None
         try:
@@ -234,6 +162,7 @@ class _BuildWatchdog:
         return latest
 
     def _run(self) -> None:
+        """Poll for silent hangs and optionally trigger recovery."""
         elapsedSec = 0
         while not self._stopEvent.wait(self.WARN_INTERVAL_SEC):
             elapsedSec += self.WARN_INTERVAL_SEC
@@ -251,11 +180,6 @@ class _BuildWatchdog:
                 allProcs = listVitisProcesses(vitisRoot)
                 staleProcs = listVitisProcesses(vitisRoot, _PROCESS_START_TIME)
                 staleDesc = ", ".join(f"{name} (pid {pid})" for pid, name in staleProcs) or "none"
-                # Never a leftover from an earlier run (staleProcs, excluded
-                # above) nor some unrelated concurrent session (this run's
-                # OWN process list, scoped to vitisRoot - see
-                # listVitisProcesses) - safe to force-kill below without
-                # risking another session's work.
                 ownProcs = [p for p in allProcs if p not in staleProcs]
                 ownDesc = ", ".join(f"{name} (pid {pid})" for pid, name in ownProcs) or "none found (may have crashed)"
             except Exception as e:
@@ -281,49 +205,25 @@ class _BuildWatchdog:
 class Workspace:
     """
     @Description
-    Resources to set app/domain configs, and create multiple applications.
+    Manage workspace checkout, rebuild, and build helpers.
     """
     SUCCESS = 0
     FAILURE = -1
     COMP_SETTINGS = "comp-settings.json"
     DEBUG = 0
-    # Files the repo's top-level .gitignore whitelists under /ws/ (so git
-    # still tracks the otherwise fully-ignored, empty workspace folder);
-    # _prepareWorkspace must never delete these on wipe.
+    # Repo-tracked entries that must survive a workspace wipe.
     PRESERVED_WS_ENTRIES = {".keep", "cleanup.cmd", "cleanup.sh"}
 
     def __init__(self):
-        # Set for real in _prepareWorkspace; "" means quietBuild falls back
-        # to plain, unfiltered building (e.g. if called before that point).
+        """Initialize workspace state used across one checkout run."""
         self._buildLogPath = ""
-        # Set for real in _prepareWorkspace; used by _extractPlatformMetadata
-        # as a scratch area so HSI's xsa-unzip side effects never land next
-        # to the checked-in xsa files under `src`.
+        # Scratch area base for HSI side effects.
         self._wsPath = ""
-        # Set from checkOutSF's allow_process_cleanup arg. startedBefore
-        # already prevents this run's own just-started server from being
-        # killed, but a *pre-existing* vitis/vitis-server process from the
-        # same install could still be an unrelated, still-active session
-        # (another workspace, another user) rather than an actual leftover
-        # from a crashed run - the OS process list alone cannot tell these
-        # apart (the workspace is bound to a running server only via a
-        # later gRPC call, never visible on its command line). So
-        # force-killing pre-existing processes is opt-in, off by default.
+        # Opt-in cleanup for pre-existing Vitis processes.
         self._allowProcessCleanup = False
-        # Set from checkOutSF's assume_yes arg. When False (the default),
-        # _confirmWorkspaceWipe prompts interactively before a full checkout
-        # wipes a non-empty ws: checkin.py and checkout.py are invoked the
-        # same way (through _vitis.bat/.ps1/.sh), so a user meaning to check
-        # in un-checked-in workspace changes can easily run checkout.py by
-        # mistake instead and silently lose them. True skips the prompt, for
-        # unattended/CI use where no interactive terminal is available.
+        # Skip the wipe confirmation prompt on full checkout.
         self._skipConfirmation = False
-        # Populated by _filterXsaFilesByVitisVersion (absolute xsa paths
-        # skipped for a positively-confirmed version mismatch): lets
-        # _resolveAppPlatform tell an app bound to one of these apart from
-        # one whose xsa reference is simply wrong/stale, with a distinct
-        # log message either way still results in a FAILURE return - only
-        # WHY is different.
+        # XSA paths skipped for a confirmed Vitis-version mismatch.
         self._versionSkippedXsaPaths = set()
 
     def setConfigDomain(self,
@@ -333,19 +233,12 @@ class Workspace:
                         ) -> int:
         """
         @Description
-        Iterate over kargs : dict elements and set domain configs.
-
-        @Insights
-        domain.set_config can raise even though the param was actually
-        applied: known vitis-py bug where params get stored dynamically
-        into the domain's UserConfig(.cmake) before the (failing) return
-        value is produced. So a raised exception here is not necessarily a
-        real failure, it is logged for visibility, not treated as fatal.
+        Apply domain configuration keys.
 
         @Parameters
-        domain: domain name of current workspace.
-        option: for processor or OS.
-        kargs: dict with {[params...] : [values...]}.
+        domain: current domain object.
+        option: config namespace, such as proc or os.
+        kargs: param/value pairs to apply.
         """
         for key, value in kargs.items():
             try:
@@ -365,18 +258,11 @@ class Workspace:
                      ) -> int:
         """
         @Description
-        Iterate over kargs : dict elements and set app configs.
-
-        @Insights
-        app.set_app_config can raise even though the param was actually
-        applied: known vitis-py bug where params get stored dynamically
-        into the app's UserConfig.cmake before the (failing) return value
-        is produced. So a raised exception here is not necessarily a real
-        failure, it is logged for visibility, not treated as fatal.
+        Apply application configuration keys.
 
         @Parameters
-        app: current application obj.
-        kargs: dict with {[params...] : [values...]}.
+        app: current application object.
+        kargs: param/value pairs to apply.
         """
         for key, value in kargs.items():
             try:
@@ -396,15 +282,12 @@ class Workspace:
                    ) -> int:
         """
         @Description
-        Set all User config from a custom file created at check in workflow.
-        Only "USER_*" keys are applied as app config; any other key present
-        (the platform/xsa correlation entry checkin.py stores alongside the
-        settings) is intentionally skipped here, see getAppPlatformXsa.
+        Apply saved USER_* settings from comp-settings.json.
 
         @Parameters
-        app: obj returned by create_application_component function from vitis.cli_client.
-        appname: name found in json file (last key) or it can be put manually.
-        filepath: comp-setting.json path.
+        app: application component object.
+        appname: application name.
+        filepath: comp-settings.json path.
         """
         dJsonStruct = JSONDecoder().decode(open(filepath).read())
         for key, value in dJsonStruct.items():
@@ -421,23 +304,14 @@ class Workspace:
                          ) -> str:
         """
         @Description
-        Read the platform/xsa correlation entry checkin.py stores alongside
-        the "USER_*" settings in comp-settings.json (the one key that is not
-        "USER_*"-prefixed), so an application always gets rebuilt against the
-        exact XSA variant it was checked in against (e.g. one hw variant vs
-        another), instead of an arbitrary/first-found platform. The entry's
-        value is either a bare xsa path string (older check-ins, before the
-        processor/domain association below was tracked) or a dict with an
-        "xsa" key (see getAppTargetProc); both are accepted here.
+        Read the recorded XSA path for an application.
 
         @Parameters
-        appname: app name, used only for logging context.
-        filepath: comp-setting.json path.
+        appname: app name, used for logging.
+        filepath: comp-settings.json path.
 
         @Returns
-        Relative xsa path as stored in the json (e.g.
-        "src\\my_platform_hw_pf\\my_platform.xsa"), or "" if none or
-        more than one candidate key is found.
+        Recorded relative xsa path, or "".
         """
         dJsonStruct = JSONDecoder().decode(open(filepath).read())
         candidates = []
@@ -461,25 +335,14 @@ class Workspace:
                         ) -> str:
         """
         @Description
-        Read the exact processor/domain instance (e.g. "psu_cortexa53_0")
-        this application was bound to at check-in time, stored inside the
-        same platform/xsa correlation entry read by getAppPlatformXsa (see
-        checkin.py's processGatherFiles). Needed on a multi-processor xsa
-        (e.g. a ZynqMP exposing both an A-class and an R5): without it,
-        every application checked in against such a platform would silently
-        get rebuilt against whichever processor _extractPlatformMetadata
-        happens to find first, rather than the one it actually used before
-        check-in. Older comp-settings.json files (checked in before this was
-        tracked) simply won't have it, and _resolveAppDomain falls back to
-        the platform's default processor in that case.
+        Read the recorded processor binding for an application.
 
         @Parameters
-        appname: app name, used only for logging context.
-        filepath: comp-setting.json path.
+        appname: app name, used for logging.
+        filepath: comp-settings.json path.
 
         @Returns
-        The recorded cpu instance name (e.g. "psu_cortexa53_0"), or "" if
-        none is recorded.
+        Recorded cpu instance name, or "".
         """
         dJsonStruct = JSONDecoder().decode(open(filepath).read())
         for key, value in dJsonStruct.items():
@@ -495,28 +358,14 @@ class Workspace:
                ) -> str:
         """
         @Description
-        Read the OS this application was checked in against (see
-        checkin.py's processGatherFiles, which stores it as "os" alongside
-        "xsa"/"cpu_instance" in the same platform/xsa correlation entry read
-        by getAppPlatformXsa/getAppTargetProc). checkin.py itself already
-        refuses to check in a non-"standalone" application, but this is
-        read back independently so _resolveAppDomain can refuse to silently
-        rebuild such an app against a "standalone" domain (see _buildPlatform,
-        which never creates anything else) if a comp-settings.json ever
-        reaches checkout.py with a different recorded OS regardless (e.g.
-        checked in by an older/patched checkin.py, or a legacy check-in
-        predating this guard), instead of relying solely on the check-in
-        side rejection. Older comp-settings.json files (checked in before
-        this was tracked) simply won't have it; those are assumed
-        "standalone", matching checkin.py's own default for the same key.
+        Read the recorded OS for an application.
 
         @Parameters
-        appname: app name, used only for logging context.
-        filepath: comp-setting.json path.
+        appname: app name, used for logging.
+        filepath: comp-settings.json path.
 
         @Returns
-        The recorded OS name (e.g. "standalone", "linux"), or "standalone"
-        if none is recorded.
+        Recorded OS name, defaulting to "standalone".
         """
         dJsonStruct = JSONDecoder().decode(open(filepath).read())
         for key, value in dJsonStruct.items():
@@ -529,31 +378,11 @@ class Workspace:
     def quietBuild(self, buildFn, desc="") -> None:
         """
         @Description
-        Run `buildFn` (a component's bound .build method, e.g. platform.build
-        or app.build) with Vitis's own build log redirected to
-        self._buildLogPath instead of the terminal; only essential/error/
-        warning lines are still echoed live, see _BuildLogFilter. Falls back
-        to plain, unfiltered building if no log path has been set up yet
-        (self._buildLogPath == "").
-
-        Despite its own docstring claiming it either returns True or raises,
-        vitis-py's build() actually returns a streamed status (SUCCESS=0/
-        FAILURE=1/IN_PROGRESS=2) and does NOT raise on a genuine content/
-        compile failure (only on gRPC/communication errors), so that return
-        value must be checked here; otherwise a real BSP/app build failure
-        silently continues into later, unrelated, harder to diagnose errors
-        instead of aborting immediately at the real cause.
-
-        Real bug found the hard way: a naive `status not in (None, True, 0)`
-        check looks reasonable but is WRONG, because Python's bool is an int
-        subclass, so `1 == True` - the genuine, integer FAILURE status (1)
-        would compare equal to the accepted `True` entry and never raise at
-        all, silently treating every failed app/platform build as success.
-        `is not True` (identity, not equality) below avoids that trap.
+        Run a build and surface only essential console output.
 
         @Parameters
-        buildFn: bound method to call, taking no arguments.
-        desc: short human-readable description, used only for logging.
+        buildFn: bound build method to call.
+        desc: short log description.
         """
         with _BuildWatchdog(desc, self._wsPath):
             if not self._buildLogPath:
@@ -575,19 +404,12 @@ class Workspace:
     def _forceRemoveReadonly(func, path_, exc_info):
         """
         @Description
-        onerror handler for shutil.rmtree: HSI/SDT generates some files
-        (e.g. hw/sdt/include/dt-bindings/**/*.h) read-only, which makes
-        os.remove/os.rmdir raise WinError 5 (Access is denied), completely
-        unrelated to the WinError 32 dangling-process case _prepareWorkspace
-        already recovers from. Clearing the read-only attribute and retrying
-        the failed operation here lets rmtree finish; if `func` still fails
-        (e.g. the file is genuinely locked by a process), the exception
-        propagates out of rmtree as before and is handled by the retry loop.
+        Retry a failed delete after clearing read-only bits.
 
         @Parameters
-        func: the failed os function (os.remove/os.rmdir/os.unlink).
-        path_: path that failed to be removed.
-        exc_info: exception info tuple, unused (kept for shutil's callback signature).
+        func: failing remove function.
+        path_: failing path.
+        exc_info: shutil callback metadata, unused.
         """
         chmod(path_, S_IWRITE)
         func(path_)
@@ -595,24 +417,10 @@ class Workspace:
     def _clearWorkspaceContents(self, ws_path) -> None:
         """
         @Description
-        Delete everything directly inside ws_path except
-        PRESERVED_WS_ENTRIES, leaving ws_path itself (and those entries)
-        in place. Used instead of shutil.rmtree(ws_path) so a wipe never
-        destroys repo-tracked files living inside the otherwise fully
-        git-ignored workspace folder (see PRESERVED_WS_ENTRIES).
-
-        The ".keep" placeholder (README Note #3, negated by
-        _ensureParentGitignore) is (re)created here unconditionally rather
-        than only when ws_path is missing: _prepareWorkspace already
-        creates ws_path beforehand, so that branch rarely fires and a
-        fresh/cleared workspace would otherwise get no trackable file.
-        "cleanup.cmd"/"cleanup.sh" are (re)installed here too: they are
-        checked in at the scripts repo root (README Note #3), but nothing
-        else copies them into ws, so without this the negated ignore
-        entries for them would refer to files that never actually exist.
+        Clear a workspace directory while preserving tracked entries.
 
         @Parameters
-        ws_path: absolute path to the workspace directory to clear.
+        ws_path: absolute workspace path to clear.
         """
         if not path.isdir(ws_path):
             makedirs(ws_path, exist_ok=True)
@@ -641,43 +449,20 @@ class Workspace:
     def _ensureParentGitignore(self, ws_path) -> None:
         """
         @Description
-        Make sure the parent repository (the one containing ws_path as a
-        sibling of the `scripts` submodule, per README Note #2) has a
-        .gitignore rule keeping this generated workspace out of `git
-        status`, while still tracking PRESERVED_WS_ENTRIES. Nothing else in
-        a fresh setup (following the README) creates this file: the old
-        Tcl-era workflow used to install `sub/template.gitignore` here, but
-        that mechanism was dropped when this repo moved to the Python
-        checkin/checkout scripts, without a replacement - so without this,
-        the entire generated workspace would be exposed to the parent
-        repository on first run. A no-op if the rule is already present.
+        Ensure the parent repository ignores the generated workspace.
 
         @Parameters
-        ws_path: absolute path to the workspace directory being (re)created.
+        ws_path: absolute workspace path being prepared.
         """
         repo_root = path.dirname(ws_path)
         gitignore_path = path.join(repo_root, ".gitignore")
         ws_name = path.basename(ws_path)
         ignore_rule = f"/{ws_name}/*"
-        # Every line the block needs to be considered complete: the blanket
-        # ignore rule plus one negation per PRESERVED_WS_ENTRIES entry. A
-        # parent repository that already has the blanket rule (e.g. from an
-        # older/partial version of this block, or added by hand) but is
-        # missing one or more negations would otherwise never get them
-        # added, silently keeping those preserved files out of `git
-        # status` forever - so check each required line individually
-        # instead of returning as soon as just the ignore rule is found.
         required_lines = [ignore_rule] + [f"!/{ws_name}/{entry}"
                                           for entry in sorted(self.PRESERVED_WS_ENTRIES)]
         existing_lines = set()
         if path.isfile(gitignore_path):
             with open(gitignore_path, "r", encoding="utf-8") as f:
-                # Compare whole, active (non-comment) lines instead of a
-                # substring search: a commented-out rule (e.g. "#/ws/*")
-                # or an unrelated, differently-anchored path (e.g.
-                # "/generated/ws/*") both contain ignore_rule as a
-                # substring, which would wrongly be treated as "already
-                # installed" and leave the generated workspace untracked.
                 existing_lines = {line.strip() for line in f
                                   if line.strip() and not line.strip().startswith("#")}
         missing_lines = [line for line in required_lines if line not in existing_lines]
@@ -696,20 +481,10 @@ class Workspace:
     def _confirmWorkspaceWipe(self, ws_path) -> None:
         """
         @Description
-        Guard against the easy mistake of running checkout.py (full wipe)
-        when checkin.py (check in first) was meant instead: both are
-        launched the same way (through _vitis.bat/.ps1/.sh), so a typo'd or
-        muscle-memory'd command can silently destroy workspace changes the
-        user never checked in. If ws_path contains anything besides
-        PRESERVED_WS_ENTRIES, prompt for an explicit "y" before letting
-        _prepareWorkspace proceed, unless self._skipConfirmation was opted
-        into (see checkOutSF's assume_yes) for unattended/CI runs where no
-        interactive terminal is available. Raises instead of returning a
-        status so an accidental/declined wipe is never mistaken for a
-        successful no-op checkout.
+        Confirm before wiping a non-empty workspace.
 
         @Parameters
-        ws_path: absolute path to the workspace directory about to be wiped.
+        ws_path: absolute workspace path about to be wiped.
         """
         if not path.isdir(ws_path):
             return
@@ -734,76 +509,22 @@ class Workspace:
     def _prepareWorkspace(self, client, ws_path) -> None:
         """
         @Description
-        (Re)create the Vitis workspace at ws_path and point `client` at it.
-        Only clears ws_path's contents, never the directory entry itself,
-        and skips PRESERVED_WS_ENTRIES (files the repo's .gitignore
-        whitelists under /ws/, e.g. ".keep" so git still tracks the
-        otherwise-empty folder) so a wipe never destroys repo-tracked
-        files. checkout.py is meant to run unattended through
-        _vitis.ps1/.bat/.sh (bundled python, no interactive Vitis IDE
-        watching over it), so a previous run's Vitis server can be left
-        dangling and hold a lock on ws_path's files; stopDanglingVitisProcesses
-        is used to clear that out between attempts, instead of blindly
-        retrying the same wipe with no recovery action - but only if
-        self._allowProcessCleanup was explicitly opted into (see
-        checkOutSF's allow_process_cleanup), since a pre-existing process
-        from the same install could just as easily be another still-active
-        Vitis session rather than an actual leftover. Read-only files
-        HSI/SDT leaves behind (see _forceRemoveReadonly) are handled within
-        the same wipe, not counted as a failed attempt. Also sets
-        self._buildLogPath, where every subsequent component build's full
-        log is kept (see quietBuild).
-
-        Ownership/lock availability is validated with a first
-        set_workspace call (see _setWorkspaceWithRetry) BEFORE any content
-        is cleared, and the wipe only proceeds once that succeeds: on
-        Unix, deleting a file another process still has open does not fail
-        (nor is it prevented on Windows for every file, only ones actually
-        locked), so wiping first and only then discovering a lock via a
-        failed set_workspace can already have destroyed an actively used
-        workspace's unlocked project files by the time the one locked file
-        is reached. That same call also makes THIS server ws_path's active
-        owner though, so the client is switched to a throwaway scratch
-        workspace to release ws_path's own lock before it is wiped, then
-        set_workspace is called again on ws_path afterward to reactivate
-        it (its "_ide" metadata was just removed by the wipe anyway).
-
-        Before anything else, _confirmWorkspaceWipe guards against the easy
-        mistake of running this (full wipe) instead of checkin.py: if
-        ws_path already has non-preserved content, it prompts for
-        confirmation (or raises if declined/non-interactive without
-        self._skipConfirmation), so un-checked-in workspace changes are
-        never silently destroyed.
+        Recreate the workspace and point the client at it.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        ws_path: absolute path to the workspace directory to (re)create.
+        client: Vitis client object.
+        ws_path: absolute workspace path to prepare.
         """
         self._confirmWorkspaceWipe(ws_path)
         makedirs(ws_path, exist_ok=True)
         self._setWorkspaceWithRetry(client, ws_path)
 
-        # The set_workspace call above makes THIS server the active owner
-        # of ws_path's own "_ide/.wsdata/.lock", so clearing ws_path next
-        # while still holding it open fails on Windows (WinError 32) - the
-        # retry cleanup below only ever targets OTHER dangling processes,
-        # never ourselves. Switch to a throwaway scratch workspace first to
-        # release ws_path's lock before deleting anything under it.
+        # Switch away first so this run releases ws_path's lock.
         scratch_ws = mkdtemp(prefix="vitis_scratch_")
         try:
             self._setWorkspaceWithRetry(client, scratch_ws)
 
-            # Empirically, set_workspace switching the server's active
-            # workspace away from ws_path does not synchronously release
-            # its own file handle on ws_path's "_ide/logs/vitis.log" (seen
-            # in practice: the very first clear attempt below fails with
-            # WinError 32 on that exact file - NOT from some OTHER dangling
-            # process, but from THIS run's own just-switched-away server,
-            # which only lets go of it a moment later). A short grace
-            # delay here avoids burning through the whole clear-retry loop
-            # (and needlessly suggesting --allow-process-cleanup, which
-            # would not even help here: stopDanglingVitisProcesses
-            # deliberately excludes this run's own just-started server).
+            # Give Vitis a moment to release its old workspace handles.
             time.sleep(1)
 
             max_try = 5
@@ -841,23 +562,13 @@ class Workspace:
     def _isWorkspaceVersionMismatch(errMsg) -> bool:
         """
         @Description
-        Detect set_workspace's workspace-metadata "version" mismatch error
-        (see _setWorkspaceWithRetry) across Vitis releases that word it
-        differently, e.g. "Vitis IDE cannot recognize the workspace
-        version. Click 'Update' to initialize the workspace metadata." vs.
-        "Vitis CLI has detected a workspace from version . Use
-        update_workspace API to upgrade it to .". Rather than matching one
-        exact phrase (fragile across releases/locales), this matches
-        loosely on wording common to both: mentions "workspace", a
-        "version", and some form of "update".
+        Detect a workspace-version mismatch error message.
 
         @Parameters
-        errMsg: str(exception) raised by client.set_workspace.
+        errMsg: str(exception) from client.set_workspace.
 
         @Returns
-        True if errMsg looks like this specific mismatch, not some other
-        set_workspace failure (e.g. a genuine lock/"already in use" error,
-        which never mentions "version").
+        True when the message looks like this mismatch.
         """
         msg = errMsg.lower()
         return "workspace" in msg and "version" in msg and "update" in msg
@@ -865,45 +576,11 @@ class Workspace:
     def _setWorkspaceWithRetry(self, client, ws_path) -> None:
         """
         @Description
-        Calls client.set_workspace(ws_path), recovering automatically from
-        a previous run's Vitis server being left dangling (checkout.py runs
-        unattended through _vitis.bat/.ps1/.sh, no interactive IDE watching
-        over it) and still holding ws_path's own lock file
-        ("_ide/.wsdata/.lock"), which makes set_workspace fail with
-        "the workspace '...' is already in use" (FAILED_PRECONDITION) even
-        though the process that created it is long gone. On failure, ONLY IF
-        self._allowProcessCleanup was explicitly opted into (see checkOutSF's
-        allow_process_cleanup), stops any dangling Vitis process
-        (stopDanglingVitisProcesses) and removes the stale lock file itself
-        (killing the process alone does not always delete it, since it may
-        not get a chance to clean up on a forceful stop), then retries a
-        bounded number of times. Without that opt-in, neither the process
-        nor the lock file is touched - a "workspace already in use" failure
-        can legitimately mean another active IDE session owns it, and
-        deleting the lock blindly could let two sessions use the workspace
-        concurrently. Shared by _prepareWorkspace and _openExistingWorkspace
-        so neither codepath needs the user to manually stop dangling
-        processes/delete the lock file before every run.
-
-        Also recovers from a distinct, unrelated failure mode: set_workspace
-        can reject ws_path over a workspace-metadata "version" mismatch -
-        seen in practice even for a brand-new/just-wiped, completely empty
-        ws_path (which has no "_ide" metadata to recognize yet either), not
-        just a genuinely older-version workspace. The exact wording is not
-        stable across Vitis releases (seen so far: "Vitis IDE cannot
-        recognize the workspace version. Click 'Update' to initialize the
-        workspace metadata." and "Vitis CLI has detected a workspace from
-        version . Use update_workspace API to upgrade it to ."), so
-        _isWorkspaceVersionMismatch matches loosely on wording common to
-        both instead of one exact substring. Retrying the identical
-        set_workspace call would just fail again unchanged, so this calls
-        client.update_workspace(ws_path) instead - the client API's own
-        documented remedy (mirroring the IDE's own "Update" button) that
-        migrates/initializes the workspace metadata and sets it in one call.
+        Set a workspace with retry and lock cleanup logic.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        ws_path: absolute path to the workspace directory to select.
+        client: Vitis client object.
+        ws_path: absolute workspace path to select.
         """
         max_try = 5
         lock_path = path.join(ws_path, "_ide", ".wsdata", ".lock")
@@ -946,15 +623,11 @@ class Workspace:
     def _openExistingWorkspace(self, client, ws_path) -> None:
         """
         @Description
-        Point `client` at ws_path without touching its contents (used for a
-        selective rebuild, see checkOutSF's `platforms`/`apps` parameters),
-        as opposed to _prepareWorkspace's full wipe-and-recreate. Sets the
-        same self._wsPath/self._buildLogPath _prepareWorkspace does, so
-        quietBuild's log filtering behaves identically either way.
+        Open an existing workspace without clearing it.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        ws_path: absolute path to the (already existing) workspace directory.
+        client: Vitis client object.
+        ws_path: absolute existing workspace path.
         """
         makedirs(ws_path, exist_ok=True)
         self._ensureParentGitignore(ws_path)
@@ -966,13 +639,10 @@ class Workspace:
     def _hashFileContents(self, filepath) -> str:
         """
         @Description
-        Compute a sha256 hex digest of filepath's contents, streamed in
-        chunks so even a large .xsa never needs to be loaded into memory
-        whole. Used only for content-based duplicate detection (see
-        _dedupeXsaFilesByContent), not for anything security-sensitive.
+        Hash a file's contents with sha256.
 
         @Parameters
-        filepath: absolute path to the file to hash.
+        filepath: absolute file path.
 
         @Returns
         Hex digest string.
@@ -986,34 +656,13 @@ class Workspace:
     def _dedupeXsaFilesByContent(self, xsa_files) -> list:
         """
         @Description
-        Collapse byte-identical .xsa files discovered in more than one
-        directory down to a single, canonical copy, so a stale duplicate
-        left behind under an old/legacy source directory (e.g. a prior
-        per-app "<app>_hw_pf" layout, superseded by a dedicated per-platform
-        directory) never becomes its own independent platform to build.
-        Without this, _discoverAppsAndPlatforms' own name-collision
-        disambiguation would instead treat every duplicate as a distinct
-        platform with a synthesized name (e.g. "dir_platform"), each
-        requiring a full, separately time-consuming HSI-extract + build for
-        content that is otherwise already covered by the canonical copy.
-
-        Only exact content duplicates are collapsed: two xsa's that merely
-        share a stem/name but differ in content (legitimate distinct
-        variants) are untouched here and still handled by the existing
-        per-directory collision-disambiguation logic below.
-
-        When a hash has more than one path, the one whose containing
-        directory's basename matches the xsa's own stem (the standard
-        one-platform-per-directory layout, see this method's docstring
-        context) is kept as canonical; if none match that pattern, the
-        first path in a stable sort order is kept instead, so the choice is
-        deterministic across runs rather than dependent on listdir order.
+        Deduplicate byte-identical XSA files.
 
         @Parameters
-        xsa_files: list of absolute paths to every discovered .xsa file.
+        xsa_files: absolute xsa paths.
 
         @Returns
-        A new list with only one path kept per distinct content hash.
+        One canonical path per distinct content hash.
         """
         by_hash = {}
         for xsa_path in xsa_files:
@@ -1042,15 +691,10 @@ class Workspace:
     def _getRunningVitisVersion(self) -> str:
         """
         @Description
-        Parse the currently active Vitis install's own version (e.g.
-        "2025.2") out of XILINX_VITIS (set by _vitis.bat/.ps1/.sh from the
-        "-v"/"--version" launcher flag, e.g. "...\\2025.2\\Vitis"), so an
-        xsa's own recorded generator version (see _getXsaGeneratorVersion)
-        can be checked for compatibility before it is ever built.
+        Read the active Vitis version from XILINX_VITIS.
 
         @Returns
-        The version string (e.g. "2025.2"), or "" if XILINX_VITIS isn't
-        set or doesn't contain a recognizable "YYYY.N" version segment.
+        Version string, or "".
         """
         match = search(r"(\d{4}\.\d)", environ.get("XILINX_VITIS", ""))
         return match.group(1) if match else ""
@@ -1058,25 +702,13 @@ class Workspace:
     def _getXsaGeneratorVersion(self, xsa_path) -> str:
         """
         @Description
-        Read the Vivado version that originally generated xsa_path,
-        straight from its own "xsa.xml" metadata file (part of every
-        xsa's standard zip contents, see
-        <GenAppInfo Name="Vivado" Version="X.Y" .../>), falling back to
-        "sysdef.xml"'s <TOOL_VERSION Version="X.Y"/> if "xsa.xml" is
-        missing or unparseable. Reading this straight out of the zip is
-        much cheaper than opening the xsa through HSI (see
-        _extractPlatformMetadata) just to check compatibility, and lets
-        an incompatible xsa be skipped before that far more expensive
-        step ever runs.
+        Read the Vivado version recorded inside an XSA.
 
         @Parameters
-        xsa_path: absolute path to the .xsa file to inspect.
+        xsa_path: absolute xsa path.
 
         @Returns
-        The version string (e.g. "2025.1"), or "" if it cannot be
-        determined (never raises - an unreadable/unrecognized version
-        must never itself block an otherwise-valid checkout, see
-        _filterXsaFilesByVitisVersion).
+        Version string, or "".
         """
         try:
             with zipfile.ZipFile(xsa_path) as zf:
@@ -1097,32 +729,13 @@ class Workspace:
     def _filterXsaFilesByVitisVersion(self, xsa_files) -> list:
         """
         @Description
-        Drop any xsa whose own recorded Vivado-generator version (see
-        _getXsaGeneratorVersion) does not match the currently active
-        Vitis install's own version (see _getRunningVitisVersion),
-        instead of attempting to build a platform from it: a version-
-        mismatched xsa has been observed in practice to make Vitis's own
-        platform export/DTS generation step hang indefinitely (see
-        _BuildWatchdog) rather than fail cleanly, for a mismatch as small
-        as one minor release (e.g. an xsa generated by Vivado 2025.1,
-        built against Vitis 2025.2). Skipping it upfront, with a clear
-        message instead of a silent multi-minute hang, lets the checkout
-        still proceed for every OTHER, compatible xsa.
-
-        Either version being undeterminable (empty string) is NOT
-        treated as a mismatch: only a POSITIVELY confirmed different
-        version excludes an xsa, so an xsa whose metadata just isn't in a
-        recognized format (or a Vitis install whose own version can't be
-        parsed from XILINX_VITIS) is still built as before, matching this
-        checkout's prior behavior.
+        Filter out XSAs known to mismatch the active Vitis version.
 
         @Parameters
-        xsa_files: list of absolute paths to every discovered .xsa file
-                  (already deduplicated by content, see
-                  _dedupeXsaFilesByContent).
+        xsa_files: discovered xsa paths.
 
         @Returns
-        A new list with every version-incompatible xsa removed.
+        Compatible xsa paths.
         """
         runningVersion = self._getRunningVitisVersion()
         if not runningVersion:
@@ -1138,9 +751,6 @@ class Workspace:
                    f"incompatible with the running Vitis {runningVersion} (a "
                    "version mismatch here has been observed to hang, not "
                    "cleanly fail, during platform export/DTS generation).")
-                # Recorded so _resolveAppPlatform can later tell an app
-                # bound to THIS xsa apart from one whose reference is
-                # simply wrong/stale (see _versionSkippedXsaPaths).
                 self._versionSkippedXsaPaths.add(
                     self._normalizeXsaPathForCompare(xsa_path))
                 continue
@@ -1150,32 +760,17 @@ class Workspace:
     def _discoverAppsAndPlatforms(self, src_root) -> tuple:
         """
         @Description
-        Walk `src_root` once to find every application folder (one with a
-        "src" subdir) and every XSA file, then group XSA files by their
-        containing "*_hw_pf" folder to derive one platform per XSA (not one
-        per folder), so multiple HW variants sharing a folder (e.g.
-        variant_a/variant_b) each get their own platform: named after the xsa's
-        own stem (e.g. "my_platform_variant_a"), only prefixed with the
-        hw_pf folder name in the rare case two different folders have xsa's
-        sharing the same stem.
+        Discover applications and XSA-backed platforms under src.
 
         @Parameters
-        src_root: absolute path to the repository's `src` folder.
+        src_root: absolute path to the src directory.
 
         @Returns
-        (app_names, hw_platforms) where app_names is a list[str] and
-        hw_platforms is a dict keyed by absolute xsa path, each value a dict
-        with at least "name", "hw_pf_dir", "xsa_path".
+        Tuple of app names and platform metadata.
         """
         app_names = []
         xsa_files = []
 
-        # Only direct children of src_root are applications/platforms per
-        # the documented layout (README "Note #2"): a fully recursive walk
-        # would wrongly turn a nested "src/my_app/src/vendor/src/..." layout
-        # into a bogus "vendor" application, and would pick up any .xsa
-        # found anywhere under an app's own src tree (e.g. a test fixture)
-        # as a spurious extra platform.
         for entry in listdir(src_root):
             entry_path = path.join(src_root, entry)
             if not path.isdir(entry_path):
@@ -1201,20 +796,10 @@ class Workspace:
         used_names = set()
         for hw_pf_dir, xsas_in_dir in xsa_by_dir.items():
             for xsa_path in xsas_in_dir:
-                # Platform name is just the xsa's own stem (e.g.
-                # "my_platform_variant_a"), not the containing hw_pf
-                # folder, so it stays meaningful even when a folder is
-                # renamed/shared. Only disambiguate with the hw_pf folder
-                # name in the rare case two different folders have xsa's
-                # sharing the same stem.
                 platform_name = path.splitext(path.basename(xsa_path))[0]
                 if platform_name in used_names:
                     hw_pf_name = path.basename(hw_pf_dir)
                     candidate_name = f"{hw_pf_name}_{platform_name}"
-                    # Keep disambiguating until unique: the hw_pf-prefixed
-                    # name can itself collide (e.g. "dir_foo.xsa" alongside
-                    # "dir/foo.xsa" both resolve to "dir_foo"), and creating
-                    # a second component with the same name would fail.
                     suffix = 2
                     while candidate_name in used_names:
                         candidate_name = f"{hw_pf_name}_{platform_name}_{suffix}"
@@ -1236,21 +821,14 @@ class Workspace:
     def _extractXsaMetadataScratch(self, xsa_path, plt_name):
         """
         @Description
-        Run GetMetadata/HSI against a throwaway COPY of xsa_path placed
-        under the workspace, never the original: HSI unzips a handful of
-        files (psu_init.*, a .bit, ...) right next to whatever xsa path it
-        is given, so opening the checked-in xsa directly would pollute the
-        `src` tree (and, on any crash between opening and cleanup, leave
-        generated files behind for git to pick up). Split out of
-        _extractPlatformMetadata to keep it focused on orchestration.
+        Run HSI metadata extraction on a scratch XSA copy.
 
         @Parameters
-        xsa_path: absolute path to the real, checked-in xsa file.
-        plt_name: unique platform name, used only to namespace the scratch
-                 dir when multiple xsa's are processed.
+        xsa_path: absolute checked-in xsa path.
+        plt_name: unique platform name for scratch namespacing.
 
         @Returns
-        The metadata dict returned by GetMetadata.
+        Metadata dict from GetMetadata.
         """
         scratch_dir = path.join(self._wsPath, "_hsi_scratch", plt_name)
         makedirs(scratch_dir, exist_ok=True)
@@ -1264,34 +842,16 @@ class Workspace:
     def _extractPlatformMetadata(self, hw_platforms) -> None:
         """
         @Description
-        Fill in "arch"/"target_proc" for every entry in hw_platforms using
-        HSI (see GetMetadata), run against a scratch copy of each xsa kept
-        under the workspace (see _extractXsaMetadataScratch) so the
-        checked-in `src` tree is never touched. Runs for every discovered
-        platform unconditionally, even during a selective/--incremental
-        run that only rebuilds one of them: _setPlatformDomainInfo (needed
-        to bind any requested app to whichever platform it resolves to,
-        rebuilt or not) also depends on "arch"/"target_proc", and which
-        platform(s) a selectively-rebuilt app may resolve to is not known
-        until after this runs, so skipping it for "not explicitly
-        requested" platforms would risk leaving an app unbindable. This
-        does add HSI-extraction overhead proportional to the total
-        platform count to every selective/--incremental run, not just the
-        one(s) actually being rebuilt.
+        Populate per-platform hardware metadata with HSI.
 
         @Parameters
-        hw_platforms: dict produced by _discoverAppsAndPlatforms, mutated in
-                     place with "arch"/"target_proc"/"target_procs" keys
-                     added.
+        hw_platforms: platform dict updated in place.
         """
         start_time = time.time()
 
         for xsa_path, plt in hw_platforms.items():
             metadata = self._extractXsaMetadataScratch(xsa_path, plt["name"])
             plt["arch"] = metadata["arch"]
-            # GetMetadata itself now recognizes MicroBlaze processor cells
-            # (see SUPPORTED_PROCESSOR_IP_NAMES) and derives their real
-            # instance name, so no FAMILY-based override is needed here.
             plt["target_proc"] = metadata["target_proc"]
             plt["target_procs"] = metadata["target_procs"]
             LOG(f"Platform \"{plt['name']}\": detected arch \"{plt['arch']}\", "
@@ -1303,20 +863,14 @@ class Workspace:
     def _findDomainCmakeCache(self, platform_dir, domain_name):
         """
         @Description
-        Locate the single CMakeCache.txt generated for domain_name's own BSP
-        under platform_dir (the just-created platform's own workspace
-        folder), used by _fixDomainCmakeFlags. A recursive search is used
-        instead of hardcoding the "libsrc/build_configs/gen_bsp" path
-        segment observed in practice, since that internal layout is
-        Vitis-generated and not part of any documented/stable contract.
+        Find a domain BSP CMakeCache.txt under a platform directory.
 
         @Parameters
-        platform_dir: absolute path to the platform's own workspace folder
-                     (client.get_workspace() + sep + platform name).
-        domain_name: name of the domain whose BSP cache is being searched for.
+        platform_dir: absolute platform workspace directory.
+        domain_name: domain name to search for.
 
         @Returns
-        Absolute path to the found CMakeCache.txt, or None if not found.
+        Absolute cache path, or None.
         """
         needle = sep + domain_name + sep + "bsp"
         for root, _, files in walk(platform_dir):
@@ -1327,17 +881,12 @@ class Workspace:
     def _fixDomainCmakeFlags(self, ws_path, platform_name, domain_name) -> None:
         """
         @Description
-        Locate domain_name's own CMakeCache.txt (see _findDomainCmakeCache)
-        and apply the Vitis 2025.2 CMAKE_*_FLAGS workaround to it (see
-        _fixCmakeFlags for the actual mechanics). A no-op (with a LOG
-        warning) if the cache cannot be found, so an unexpected layout
-        surfaces as the original build failure rather than a confusing
-        partial edit.
+        Apply the CMake flags workaround to a domain BSP cache.
 
         @Parameters
-        ws_path: absolute path to the Vitis workspace (client.get_workspace()).
-        platform_name: name of the just-created platform.
-        domain_name: name of the domain whose BSP flags need fixing.
+        ws_path: absolute Vitis workspace path.
+        platform_name: platform name.
+        domain_name: target domain name.
         """
         platform_dir = path.join(ws_path, platform_name)
         cache_path = self._findDomainCmakeCache(platform_dir, domain_name)
@@ -1350,37 +899,20 @@ class Workspace:
     def _fixCmakeFlags(self, cache_path, label) -> bool:
         """
         @Description
-        Work around a Vitis 2025.2 code-generation bug (see _buildPlatform's
-        call site for the full explanation): reconstruct and overwrite
-        CMAKE_C_FLAGS/CMAKE_CXX_FLAGS/CMAKE_ASM_FLAGS in cache_path with the
-        value its own toolchain file intended (built from that same cache's
-        own, correctly-cached TOOLCHAIN_*_FLAGS/TOOLCHAIN_DEP_FLAGS/
-        CMAKE_SPECS_FILE/CMAKE_INCLUDE_PATH entries), instead of whatever
-        CMake's own first-configure CACHE-seeding left behind. The same bug
-        affects both a platform domain's BSP cache (fixed proactively, right
-        after add_domain(), see _fixDomainCmakeFlags) and an application's
-        own build/CMakeCache.txt - but unlike a domain's BSP, an app's cache
-        doesn't exist until its own build actually starts, so it can only be
-        fixed reactively, after a first build failure (see _buildApplication).
-        A no-op (with a LOG warning) if the expected building-block entries
-        cannot be found, so an unexpected layout surfaces as the original
-        build failure rather than a confusing partial edit.
+        Rebuild CMAKE_*_FLAGS values from toolchain cache entries.
 
         @Parameters
-        cache_path: absolute path to the CMakeCache.txt to fix.
-        label: short human-readable description of what cache_path belongs
-              to, used only for logging context.
+        cache_path: absolute CMakeCache.txt path.
+        label: short logging label.
 
         @Returns
-        True if at least one CMAKE_<LANG>_FLAGS entry's value actually
-        changed, False otherwise (nothing needed fixing, or the expected
-        building-block entries were not found) - used by _buildApplication
-        to decide whether a rebuild is worth retrying.
+        True if any cached flag changed.
         """
         with open(cache_path, "r", encoding="utf-8") as f:
             cache_text = f.read()
 
         def cacheVar(var_name):
+            """Return one cached CMake variable value."""
             m = search(rf"^{var_name}:\w+=(.*)$", cache_text, RegexFlag.MULTILINE)
             return m.group(1) if m else None
 
@@ -1400,19 +932,10 @@ class Workspace:
             if lang_flags is None:
                 continue
             fixed_value = f"{lang_flags} {dep_flags} -specs={specs_file}"
-            # Omit the include option entirely when there's no path: a bare
-            # trailing "-I" with nothing after it makes the compiler
-            # consume the next command-line token as the include dir (or
-            # report a missing argument), turning this fix-up into another
-            # build failure.
             if include_path:
                 fixed_value += f" -I{include_path}"
             if cacheVar(f"CMAKE_{lang}_FLAGS") == fixed_value:
                 continue
-            # fixed_value can contain Windows paths with backslashes; a
-            # plain string replacement would have re.sub interpret those
-            # as escape/group-reference sequences (e.g. "\C..."), so use a
-            # callable replacement to insert it as a literal value instead.
             cache_text, n = compile(rf"^(CMAKE_{lang}_FLAGS:\w+)=.*$", RegexFlag.MULTILINE).subn(
                 lambda m: f"{m.group(1)}={fixed_value}", cache_text, count=1
                 )
@@ -1428,13 +951,11 @@ class Workspace:
     def _configureMicroblazeDomain(self, domain, domain_name) -> None:
         """
         @Description
-        Apply the standard BSP proc/os settings this repo's MicroBlaze
-        platforms (spartan7/artix7/kintex7) need, split out of
-        _buildPlatform to keep that method focused on orchestration.
+        Apply standard MicroBlaze BSP settings.
 
         @Parameters
-        domain: domain obj returned by platform.add_domain.
-        domain_name: name of `domain`, used only for logging context.
+        domain: domain object.
+        domain_name: domain name for logging.
         """
         LOG(f"Configuring BSP settings for the domain \"{domain_name}\"...")
         self.setConfigDomain(
@@ -1469,19 +990,13 @@ class Workspace:
     def _buildZynqMPFsbl(self, client, platform, plt, repo_path) -> None:
         """
         @Description
-        Add the FSBL domain to a zynquplus platform, generate/build a custom
-        FSBL application from the template, then rebuild the platform with
-        the resulting elf as its boot bsp. Split out of _buildPlatform to
-        keep that method focused on orchestration.
+        Build and attach the ZynqMP FSBL application.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        platform: platform component obj (already built once) to attach the
-                 FSBL domain/elf to.
-        plt: entry from the hw_platforms dict, needs "name"/"target_proc".
-        repo_path: absolute path to a custom embeddedsw checkout (see
-                  checkOutSF's esw_repo), or None to use whichever
-                  embeddedsw copy ships bundled with the Vitis install.
+        client: Vitis client object.
+        platform: built platform component.
+        plt: platform metadata entry.
+        repo_path: optional embeddedsw override path.
         """
         name = plt["name"]
         target_proc = plt["target_proc"]
@@ -1502,9 +1017,6 @@ class Workspace:
             )
 
         self.quietBuild(platform.build, f"platform \"{name}\" (fsbl domain)")
-        # Generating custom fsbl application from template. Named after the
-        # platform so multiple zynqmp platforms in the same workspace do not
-        # collide on a single "ZynqMP_FSBL".
         fsbl_app_name = f"{name}_FSBL"
         LOG(f"Creating FSBL application \"{fsbl_app_name}\" for platform \"{name}\"...")
         fsbl_app = client.create_app_component(
@@ -1530,44 +1042,7 @@ class Workspace:
         self.quietBuild(platform.build, f"platform \"{name}\" (with fsbl elf)")
 
     def _buildPlatform(self, client, xsa_path, plt, repo_path):
-        """
-        @Description
-        Thin wrapper around _buildPlatformImpl that keeps a _BuildWatchdog
-        running for its ENTIRE duration, not just the final quietBuild(
-        platform.build) call at the end. The observed hang (platform
-        creation/domain-add streaming "Generating Export directory" and
-        never returning) happens INSIDE client.create_platform_component()/
-        platform.add_domain() themselves - both blocking, unfiltered SDK
-        calls made before quietBuild is ever reached - so a watchdog placed
-        only inside quietBuild (see its own docstring) never even started
-        for this specific hang.
-
-        The watchdog runs with auto_recover=True: once it confirms a
-        genuine hang (no console output AND no workspace file activity),
-        it force-stops this run's own stuck Vitis backend itself, which
-        makes the blocking call above raise instead of hanging forever.
-        That failure is caught here (ONLY when caused by our own recovery
-        kill - watchdog.killedForRecovery - any other failure is still
-        raised as before) and this platform's build is retried exactly
-        once, from scratch, in a freshly started Vitis session bound to
-        the SAME (already-prepared) workspace.
-
-        @Parameters
-        client: Vitis client obj returned by create_client().
-        xsa_path: absolute path to this platform's xsa file.
-        plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms).
-        repo_path: absolute path to a custom embeddedsw checkout (see
-                  checkOutSF's esw_repo), or None to use whichever
-                  embeddedsw copy ships bundled with the Vitis install.
-                  Only used for zynqmp platforms.
-
-        @Returns
-        The Vitis client to use for ALL subsequent calls: normally the
-        same `client` passed in, but a NEW client object if automatic hang
-        recovery had to recreate the Vitis session - callers MUST replace
-        their own reference with this return value, since the original
-        `client` may now point at a dead/killed session.
-        """
+        """Build one platform and return the client to keep using."""
         watchdog = _BuildWatchdog(f"platform \"{plt['name']}\"", self._wsPath, auto_recover=True)
         try:
             with watchdog:
@@ -1581,12 +1056,7 @@ class Workspace:
                "hang; starting a fresh Vitis session and retrying this "
                "platform once...")
 
-        # This run's own backend was just force-killed above (not an
-        # ambiguous "maybe another session owns it" guess - see
-        # _setWorkspaceWithRetry), so any lock file it left behind is
-        # known-stale and safe to clear unconditionally, regardless of
-        # self._allowProcessCleanup (which only governs the ambiguous
-        # dangling-process case).
+        # Recovery left a stale lock behind; clear it before retrying.
         lock_path = path.join(self._wsPath, "_ide", ".wsdata", ".lock")
         if path.isfile(lock_path):
             try:
@@ -1598,19 +1068,14 @@ class Workspace:
         dispose()
         client = create_client()
         self._setWorkspaceWithRetry(client, self._wsPath)
-        # The failed attempt may have partially created this platform (and/
-        # or its zynqmp FSBL sibling) before hanging - delete any such
-        # remnant first, else create_platform_component below fails with
-        # "project ...\<name> already exists".
+        # Remove partial components from the failed attempt.
         existing = {c["name"] for c in client.list_components()}
         for stale_name in (plt["name"], f"{plt['name']}_FSBL"):
             if stale_name in existing:
                 LOG(f"Deleting partially-built component \"{stale_name}\" before retry...")
                 client.delete_component(name=stale_name)
 
-        # No auto_recover on the retry: a SECOND genuine hang on the same
-        # platform is treated as a real, unrecoverable failure rather than
-        # retried indefinitely.
+        # Do not auto-recover again on the retry.
         with _BuildWatchdog(f"platform \"{plt['name']}\" (retry)", self._wsPath):
             self._buildPlatformImpl(client, xsa_path, plt, repo_path)
         return client
@@ -1618,25 +1083,13 @@ class Workspace:
     def _buildPlatformImpl(self, client, xsa_path, plt, repo_path) -> None:
         """
         @Description
-        Create, configure and build ONE platform component from an already
-        HSI-inspected entry (see _extractPlatformMetadata), including the
-        ZynqMP FSBL domain/application when needed (see _buildZynqMPFsbl).
-        Adds one domain per entry in plt["target_procs"] (e.g. a ZynqMP xsa
-        exposing both an A-class and an R5 gets a domain for each, instead
-        of only ever the first processor found), so an application checked
-        in bound to a specific processor (see getAppTargetProc) can later be
-        rebuilt against that same domain rather than an arbitrary one.
-        Adds "domains"/"domain_name"/"xpfm" to `plt` for later use by
-        _buildApplication (see _setPlatformDomainInfo).
+        Create, configure, and build one platform component.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        xsa_path: absolute path to this platform's xsa file.
-        plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms).
-        repo_path: absolute path to a custom embeddedsw checkout (see
-                  checkOutSF's esw_repo), or None to use whichever
-                  embeddedsw copy ships bundled with the Vitis install.
-                  Only used for zynqmp platforms.
+        client: Vitis client object.
+        xsa_path: absolute xsa path.
+        plt: platform metadata entry.
+        repo_path: optional embeddedsw override path.
         """
         name = plt["name"]
         arch = plt["arch"]
@@ -1649,14 +1102,6 @@ class Workspace:
             platform_kwargs["no_boot_bsp"] = True
         platform = client.create_platform_component(**platform_kwargs)
         if platform is None:
-            # create_platform_component's underlying _createPlatform swallows
-            # a Ctrl+C during the (long) platform build - it catches
-            # KeyboardInterrupt internally, prints its own "Process
-            # interrupted by user." and cancels the request server-side, but
-            # never re-raises, silently returning None instead of raising.
-            # Without this check that turns into a confusing, unrelated
-            # AttributeError on the next line (platform.update_desc); this
-            # gives a clear, actionable message instead.
             raise Exception(f"Platform \"{name}\" creation returned no result - "
                              "likely interrupted (e.g. Ctrl+C) or failed silently "
                              f"during the build; see {self._buildLogPath or 'the console output above'}.")
@@ -1668,17 +1113,6 @@ class Workspace:
             domain_name = f"domain_{target_proc}"
 
             LOG(f"Adding domain \"{domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
-            # support_app must match the template _buildApplication actually uses
-            # ("empty_application", see below) so the domain's BSP is generated
-            # for the same app shape our real apps get built against; leaving
-            # this as "hello_world" causes a mismatched BSP that can fail its own
-            # CMake toolchain test when a second platform is built in the same
-            # workspace/session.
-            # TODO: add real "linux" (and other non-"standalone") OS/domain
-            # support here - checkin.py currently rejects any such app (and
-            # _resolveAppDomain independently refuses to resolve one, as a
-            # second guard against a legacy/older check-in), so this only
-            # ever needs to build "standalone" domains for now.
             domain = platform.add_domain(
                 cpu=target_proc,
                 os="standalone",
@@ -1687,20 +1121,6 @@ class Workspace:
                 support_app="empty_application"
                 )
 
-            # Vitis 2025.2 bug: for a "regular" (non-FSBL) domain, the generated
-            # <proc>_toolchain.cmake sets CMAKE_C_FLAGS/CXX_FLAGS/ASM_FLAGS via
-            # plain, non-FORCE `set(... CACHE STRING ...)` calls, which CMake's
-            # own first-configure CACHE-seeding silently wins against (leaving
-            # them at whatever CMAKE_<LANG>_FLAGS_INIT/$ENV{CFLAGS,CXXFLAGS}
-            # provided, or blank for ASM) instead of the toolchain file's
-            # intended "${TOOLCHAIN_..._FLAGS} ... -specs=${CMAKE_SPECS_FILE}
-            # ..." value - so every regular domain's BSP silently compiles with
-            # the wrong flags/specs (missing -DSDT, dependency flags, and the
-            # domain's own Xilinx.spec), causing "initializer element is not
-            # computable at load time"/undeclared XPAR_* build failures further
-            # down the pipeline. _fixDomainCmakeFlags reconstructs and
-            # overwrites the correct values directly in the domain's
-            # CMakeCache.txt afterwards.
             self._fixDomainCmakeFlags(client.get_workspace(), name, domain_name)
 
             if proc_is_microblaze:
@@ -1716,32 +1136,17 @@ class Workspace:
     def _setPlatformDomainInfo(self, client, plt) -> None:
         """
         @Description
-        Set "domains"/"domain_name"/"xpfm" on `plt`, used by
-        _buildApplication to resolve/bind an application to its platform.
-        Split out of _buildPlatform so checkOutSF can also call it for a
-        platform that is being intentionally left alone during a selective
-        rebuild (see --platform/--app), whose "domains"/"domain_name"/
-        "xpfm" would otherwise never get filled in without rebuilding it
-        (all are pure functions of plt's own "name"/"target_proc"/
-        "target_procs", already known from _extractPlatformMetadata, not of
-        anything the actual build produces).
+        Fill in derived domain and xpfm metadata on a platform entry.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms/
-            _extractPlatformMetadata), needs "name"/"target_proc"/
-            "target_procs".
+        client: Vitis client object.
+        plt: platform metadata entry.
         """
         name = plt["name"]
         plt["domains"] = {
             target_proc: f"domain_{target_proc}"
             for target_proc in plt["target_procs"]
             }
-        # Default/fallback domain (e.g. for an app with no recorded
-        # processor association, see _resolveAppDomain): the platform's
-        # primary processor, i.e. the first one _extractPlatformMetadata
-        # found - kept as its own key for backward compatibility with
-        # anything still expecting a single "domain_name" per platform.
         plt["domain_name"] = plt["domains"].get(
             plt["target_proc"],
             next(iter(plt["domains"].values()), f"domain_{plt['target_proc']}")
@@ -1752,18 +1157,11 @@ class Workspace:
     def _rebuildPlatformInPlace(self, client, plt) -> None:
         """
         @Description
-        Reuse an already-built platform component as-is (see checkOutSF's
-        `incremental` parameter) instead of deleting and recreating it: just
-        fetches the existing component and rebuilds it, without touching its
-        domain/FSBL configuration. Meant for quickly recompiling after
-        source-level BSP edits only; any HW/domain-level change (a different
-        xsa, a changed processor/OS/support_app, ...) still needs a full
-        rebuild (the default, non-incremental path), since add_domain()/
-        _buildZynqMPFsbl() are not re-run here.
+        Rebuild an existing platform component in place.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        plt: entry from the hw_platforms dict (see _discoverAppsAndPlatforms).
+        client: Vitis client object.
+        plt: platform metadata entry.
         """
         name = plt["name"]
         LOG(f"Reusing existing platform component \"{name}\" in place (--incremental)...")
@@ -1775,51 +1173,13 @@ class Workspace:
                         strict_top_level=False) -> None:
         """
         @Description
-        Recursively removes files/dirs present under dest_dir but no
-        longer present (at the same relative path) under src_dir, so a
-        component's on-disk copy stops silently retaining files that were
-        deleted or renamed in the checked-in source since the last
-        --incremental rebuild. import_files() only ever copies files IN
-        (confirmed against vitis-py's own component.py); it never removes
-        a destination file/dir that has no more matching source, so
-        without this, a stale copy keeps being compiled/linked into an
-        --incremental build even after being deleted/renamed at the
-        source, silently diverging from the checked-in source tree.
+        Remove files missing from the checked-in source tree.
 
         @Parameters
-        dest_dir: component-side directory being mirrored (already
-                  imported at least once).
-        src_dir: checked-in source directory dest_dir is a copy of.
-        top_level_skip: entry names (dest_dir's own direct children only,
-                        not recursed into) to never touch, e.g. a
-                        still-valid extra module dir handled by its own
-                        separate call.
-        strict_top_level: dest_dir's own direct children (not recursed
-                        into ones, where source and Vitis-generated
-                        metadata live mixed side by side - CMakeLists.txt,
-                        UserConfig.cmake, app.yaml, .clangd,
-                        compile_commands.json, .compile_commands, ... none
-                        of these are a stable/enumerable set across Vitis
-                        versions) are pruned conservatively: a FILE is only
-                        removed if its extension is a known source
-                        extension (see PRUNABLE_SRC_FILE_EXTENSIONS); a
-                        DIRECTORY with no source counterpart is never
-                        auto-deleted here at all (confirmed both app.yaml,
-                        a file, and ".compile_commands", a directory, are
-                        genuine Vitis-generated metadata living at this
-                        exact level - deleting the former broke the next
-                        build outright with "Error in retargeting the
-                        Application"; guessing which directory names are
-                        "safe" is not reliable enough to automate, so a
-                        stale EXTRA MODULE directory - the one directory-
-                        level case that must still be pruned - is instead
-                        tracked/removed explicitly via a manifest, see
-                        _extraModulesManifestPath/_rebuildApplicationInPlace).
-                        Only ever True for the direct call on an app's own
-                        top-level "src" dir; nested/recursive calls always
-                        leave it False, since a subdirectory that made it
-                        this deep is necessarily part of the mirrored
-                        source tree, never Vitis metadata.
+        dest_dir: mirrored component directory.
+        src_dir: source directory to mirror.
+        top_level_skip: direct children to preserve.
+        strict_top_level: prune only known source files at dest_dir root.
         """
         if not path.isdir(dest_dir):
             return
@@ -1845,21 +1205,15 @@ class Workspace:
     def _extraModulesManifestPath(self, app) -> str:
         """
         @Description
-        Path to the small manifest file recording which extra module
-        directory names (see _importAppExtraModules) were imported into
-        `app` the last time it was (re)built, so a later --incremental
-        rebuild can tell "an extra module dir with no current source
-        counterpart because it was genuinely renamed/removed" (safe/
-        desired to delete) apart from any other unrelated top-level
-        directory Vitis itself may have generated (never safe to delete
-        by guesswork, see _pruneStaleFiles' strict_top_level).
+        Return the extra-module manifest path for an app.
 
         @Parameters
-        app: application component obj.
+        app: application component object.
         """
         return path.join(app.component_location, ".digilent_extra_modules")
 
     def _readExtraModulesManifest(self, app) -> set:
+        """Read the recorded extra-module names for an app."""
         manifest_path = self._extraModulesManifestPath(app)
         if not path.isfile(manifest_path):
             return set()
@@ -1867,28 +1221,18 @@ class Workspace:
             return {line.strip() for line in f if line.strip()}
 
     def _writeExtraModulesManifest(self, app, module_names) -> None:
+        """Write the recorded extra-module names for an app."""
         with open(self._extraModulesManifestPath(app), "w") as f:
             f.writelines(f"{name}\n" for name in sorted(module_names))
 
     def _writePlatformSourceDirManifest(self, platform, hw_pf_dir) -> None:
         """
         @Description
-        Record the platform's original "src" folder name (e.g.
-        "my_platform_hw_pf") into a small manifest file inside the platform's
-        own workspace component dir, so checkin.py can check the xsa back
-        into that same folder even when the workspace platform component
-        name differs from it (see _discoverAppsAndPlatforms: the component
-        is named after the xsa's own stem, disambiguated with the hw_pf
-        folder name only on a stem collision). Without this, check-in would
-        create a brand-new "src/<xsa-stem>" dir named after the component
-        instead, orphaning the original folder's stale xsa for the next
-        checkout to rediscover as a bogus duplicate platform.
+        Record the original source directory name for a platform.
 
         @Parameters
-        platform: platform component obj, just created by
-                 client.create_platform_component.
-        hw_pf_dir: absolute path to the platform's original containing
-                  folder under `src` (see _discoverAppsAndPlatforms).
+        platform: newly created platform component.
+        hw_pf_dir: original containing directory under src.
         """
         manifest_path = path.join(platform.project_location, ".digilent_source_dir")
         with open(manifest_path, "w") as f:
@@ -1897,22 +1241,12 @@ class Workspace:
     def _rebuildApplicationInPlace(self, client, app_name, repo_root) -> None:
         """
         @Description
-        Reuse an already-built application component as-is (see checkOutSF's
-        `incremental` parameter) instead of deleting and recreating it:
-        prunes any file/extra-module-dir deleted or renamed at the source
-        since the last run (see _pruneStaleFiles - import_files alone would
-        silently leave stale copies behind), re-syncs its sources (main
-        "src" folder plus any extra module, see _importAppExtraModules)
-        from `src` via import_files, then rebuilds (see
-        _buildAppWithFlagsRetry), relying on cmake's own incremental
-        compilation to only recompile what actually changed - much faster
-        than _buildApplication's full delete+recreate+full-rebuild for a
-        source-only edit.
+        Re-sync and rebuild an existing application in place.
 
         @Parameters
-        client: Vitis client obj returned by create_client().
-        app_name: application folder name under `src`.
-        repo_root: absolute path to the parent repository (parent of `src`).
+        client: Vitis client object.
+        app_name: application folder name under src.
+        repo_root: absolute repository root.
         """
         LOG(f"Reusing existing application component \"{app_name}\" in place (--incremental)...")
         app = client.get_component(name=app_name)
@@ -1948,21 +1282,13 @@ class Workspace:
     def _normalizeXsaPathForCompare(xsa_path) -> str:
         """
         @Description
-        Normalize an xsa path for cross-platform/host comparison: the
-        correlation path stored in comp-settings.json is written with
-        whatever separator the check-in host used, so a Windows-checked-in
-        value (e.g. "src\\platform\\design.xsa") would never match a
-        Linux-discovered path (which only uses "/") without first folding
-        both to a common separator. Also folds case on Windows, where the
-        filesystem (and thus path.normpath) is case-insensitive.
+        Normalize an XSA path for direct comparison.
 
         @Parameters
-        xsa_path: an absolute or comp-settings.json-relative xsa path,
-                  possibly using either "/" or "\\" as separator.
+        xsa_path: absolute or relative xsa path.
 
         @Returns
-        A normalized string suitable for direct "==" comparison against
-        another path normalized the same way.
+        Normalized path string.
         """
         normalized = path.normpath(xsa_path.replace("\\", "/").replace("/", sep))
         if platform.system() == "Windows":
@@ -1970,26 +1296,7 @@ class Workspace:
         return normalized
 
     def _resolveAppPlatform(self, app_name, comp_settings_path, hw_platforms, repo_root):
-        """
-        @Description
-        Determine which entry of hw_platforms `app_name` should bind to,
-        based on the platform/xsa correlation entry in its own
-        comp-settings.json (see getAppPlatformXsa). Falls back to the only
-        detected platform if the app has no such entry, or returns None
-        (with a clear log message) if that cannot be determined safely.
-        Split out of _buildApplication to keep that method focused on
-        orchestration.
-
-        @Parameters
-        app_name: application folder name under `src`.
-        comp_settings_path: absolute path to this app's comp-settings.json.
-        hw_platforms: dict produced by _discoverAppsAndPlatforms/_buildPlatform.
-        repo_root: absolute path to the parent repository (parent of `src`),
-                  the relative xsa path in comp-settings.json is anchored to.
-
-        @Returns
-        The resolved hw_platforms entry, or None if it could not be resolved.
-        """
+        """Resolve an application to its platform metadata entry."""
         requested_xsa = self.getAppPlatformXsa(app_name, filepath=comp_settings_path)
         if requested_xsa != "":
             requested_xsa_abs = self._normalizeXsaPathForCompare(
@@ -1997,21 +1304,7 @@ class Workspace:
             for xsa_path, candidate in hw_platforms.items():
                 if self._normalizeXsaPathForCompare(xsa_path) == requested_xsa_abs:
                     return candidate
-            # The app explicitly named an XSA and it wasn't found: do NOT
-            # fall back to "the only detected platform" below, since that
-            # would silently bind the app to a platform it never asked
-            # for (defeating the stored hardware association and possibly
-            # building for the wrong target).
             if requested_xsa_abs in self._versionSkippedXsaPaths:
-                # Distinguish this from a genuinely wrong/stale xsa
-                # reference below: this app's xsa DID exist and WAS
-                # detected, it was deliberately skipped upfront for a
-                # positively-confirmed Vitis version mismatch (see
-                # _filterXsaFilesByVitisVersion). Still a FAILURE either
-                # way (the app can't be built without its platform), but
-                # the operator needs to know WHY so they fix the actual
-                # xsa/Vitis mismatch instead of chasing a phantom
-                # "missing platform" bug.
                 LOG(f"Application \"{app_name}\" references XSA \"{requested_xsa}\" "
                    "which was skipped for a Vitis version mismatch (see "
                    "the earlier \"Skipping\" message): resolve that "
@@ -2036,32 +1329,15 @@ class Workspace:
     def _resolveAppDomain(self, app_name, comp_settings_path, plt):
         """
         @Description
-        Pick which platform domain (see _setPlatformDomainInfo) app_name
-        binds to, using the processor recorded at check-in time (see
-        getAppTargetProc): needed since a multi-processor xsa gets one
-        domain per processor (see _buildPlatform). A nonempty recorded
-        processor is authoritative - fails if it's no longer available,
-        instead of silently rebuilding against a different CPU. Falls
-        back to the platform's default domain only when none was recorded.
-
-        Also refuses to resolve any app whose recorded OS (see getAppOs)
-        is not "standalone": _buildPlatform only ever creates "standalone"
-        domains, and checkin.py only ever checks in a "standalone" app, so
-        anything else reaching here (e.g. a legacy check-in predating that
-        guard) would otherwise be silently rebuilt against a "standalone"
-        domain/template instead of its actual target - see the reasoning
-        in checkin.py's processGatherFiles.
+        Resolve the domain name an application should use.
 
         @Parameters
-        app_name: application folder name under `src`, used only for logging.
-        comp_settings_path: absolute path to this app's comp-settings.json.
-        plt: entry from the hw_platforms dict (see _setPlatformDomainInfo),
-            needs "domains"/"domain_name"/"name".
+        app_name: application folder name under src.
+        comp_settings_path: absolute comp-settings.json path.
+        plt: platform metadata entry with domain info.
 
         @Returns
-        The domain name to bind `app_name` to, or None if a nonempty
-        recorded processor is no longer available on this platform, or if
-        the recorded OS is not "standalone".
+        Domain name, or None.
         """
         app_os = self.getAppOs(app_name, filepath=comp_settings_path)
         if app_os != "standalone":
@@ -2084,28 +1360,15 @@ class Workspace:
     def _isAppBoundToVersionSkippedXsa(self, app_name, comp_settings_path, repo_root) -> bool:
         """
         @Description
-        Check whether app_name's own recorded xsa reference (see
-        getAppPlatformXsa) is one _filterXsaFilesByVitisVersion skipped
-        for a version mismatch this run, as opposed to being unresolved
-        for any other reason (stale/typo'd reference, unsupported OS, a
-        CPU no longer on the platform, etc - see _appHasValidMapping).
-        Lets checkOutSF tell these apart: an app unresolved ONLY because
-        of an already-logged, well-understood version skip can be safely
-        excluded from this run alone, while every other kind of
-        unresolved app is unpredictable enough that it must still abort
-        the whole checkout before any component is deleted.
+        Check whether an app references a version-skipped XSA.
 
         @Parameters
-        app_name: application folder name under `src` (unused directly,
-                 kept for symmetry/clarity with the other _resolveApp*
-                 helpers - no logging happens here).
-        comp_settings_path: absolute path to this app's comp-settings.json.
-        repo_root: absolute path to the parent repository (parent of `src`),
-                  the relative xsa path in comp-settings.json is anchored to.
+        app_name: application folder name under src.
+        comp_settings_path: absolute comp-settings.json path.
+        repo_root: absolute repository root.
 
         @Returns
-        True only if app_name has a recorded xsa reference AND that exact
-        xsa was skipped by _filterXsaFilesByVitisVersion this run.
+        True if the exact recorded xsa was skipped this run.
         """
         requested_xsa = self.getAppPlatformXsa(app_name, filepath=comp_settings_path)
         if requested_xsa == "":
@@ -2117,20 +1380,15 @@ class Workspace:
     def _appHasValidMapping(self, app_name, hw_platforms, repo_root) -> bool:
         """
         @Description
-        Check, without side effects, whether app_name resolves to a valid
-        platform+domain (see _resolveAppPlatform/_resolveAppDomain). Used
-        to validate every selected app up front before checkOutSF deletes
-        or rebuilds any of them, so an unresolvable one is caught before an
-        earlier, previously-working component is destroyed.
+        Check whether an app resolves to a valid platform and domain.
 
         @Parameters
-        app_name: application folder name under `src`.
-        hw_platforms: dict produced by _discoverAppsAndPlatforms/
-                     _buildPlatform, each value has "domains"/"domain_name".
-        repo_root: absolute path to the parent repository (parent of `src`).
+        app_name: application folder name under src.
+        hw_platforms: platform metadata with domain info.
+        repo_root: absolute repository root.
 
         @Returns
-        True if app_name resolves to both a platform and a domain.
+        True if both mappings resolve.
         """
         comp_settings_path = (repo_root + sep + "src" + sep + app_name +
                               sep + Workspace.COMP_SETTINGS)
@@ -2140,24 +1398,7 @@ class Workspace:
         return self._resolveAppDomain(app_name, comp_settings_path, plt) is not None
 
     def _buildApplication(self, client, app_name, hw_platforms, repo_root) -> bool:
-        """
-        @Description
-        Resolve (see _resolveAppPlatform/_resolveAppDomain), create,
-        configure and build ONE application component.
-
-        @Parameters
-        client: Vitis client obj returned by create_client().
-        app_name: application folder name under `src`.
-        hw_platforms: dict produced by _discoverAppsAndPlatforms/
-                     _buildPlatform, each value has "xpfm"/"domain_name".
-        repo_root: absolute path to the parent repository (parent of `src`).
-
-        @Returns
-        True if the application was resolved and built. False if it could
-        not be resolved to a platform/domain (see _resolveAppPlatform/
-        _resolveAppDomain) - callers must treat this as a checkout
-        failure, not silently continue with an incomplete workspace.
-        """
+        """Resolve, create, configure, and build one application."""
         comp_settings_path = (repo_root + sep + "src" + sep + app_name +
                               sep + Workspace.COMP_SETTINGS)
 
@@ -2209,37 +1450,12 @@ class Workspace:
     def _importAppExtraModules(self, app, app_name, repo_root) -> None:
         """
         @Description
-        Import any extra module directory checked in alongside an
-        application's own "src" folder under `src/<app_name>/` (e.g. a
-        small shared driver module like "my_shared_module", a sibling of
-        "src" rather than nested inside it) into the SAME-named
-        subdirectory under the component's own "src", matching where this
-        repo's comp-settings.json's USER_COMPILE_SOURCES/
-        USER_INCLUDE_DIRECTORIES entries (see decJSON_Ws) expect to find
-        them. USER_INCLUDE_DIRECTORIES does get consumed (via
-        target_include_directories()), so headers resolve fine, but
-        USER_COMPILE_SOURCES is a genuine Vitis 2025.2 CMakeLists.txt-
-        generation gap: the generated CMakeLists.txt only ever populates
-        its build sources via aux_source_directory(${CMAKE_SOURCE_DIR}
-        _sources), which is NON-recursive (direct children of the
-        component's own "src" only) and never references
-        USER_COMPILE_SOURCES at all - so an extra module's .c file is
-        silently left out of the build (compiles headers fine, but is
-        never itself compiled/linked, "undefined reference" at link
-        time), unless _wireExtraSourcesIntoCMakeLists patches it in.
-        Shared by _buildApplication (fresh component) and
-        _rebuildApplicationInPlace (--incremental, reused component) so
-        both stay in sync with the same layout. Always (re)writes the
-        extra-modules manifest (see _writeExtraModulesManifest), even to
-        an empty set, so a later --incremental rebuild that finds this
-        app has no extra modules anymore can still tell apart "never had
-        one" from "used to have one, now removed" (needed by
-        _rebuildApplicationInPlace's stale-directory cleanup).
+        Import sibling source modules for an application.
 
         @Parameters
-        app: application component obj (already created, "src" imported).
-        app_name: application folder name under `src`.
-        repo_root: absolute path to the parent repository (parent of `src`).
+        app: created application component.
+        app_name: application folder name under src.
+        repo_root: absolute repository root.
         """
         app_root = repo_root + sep + "src" + sep + app_name
         imported_modules = set()
@@ -2257,20 +1473,11 @@ class Workspace:
     def _wireExtraSourcesIntoCMakeLists(self, app, app_name) -> None:
         """
         @Description
-        Work around the Vitis 2025.2 CMakeLists.txt-generation gap
-        described in _importAppExtraModules: patches the generated
-        CMakeLists.txt, once, to also append UserConfig.cmake's
-        USER_COMPILE_SOURCES (already correctly populated by decJSON_Ws)
-        into "_sources" right after aux_source_directory() populates it,
-        with REMOVE_DUPLICATES afterwards since USER_COMPILE_SOURCES also
-        happens to re-list the component's own direct sources (e.g.
-        "main.c", already picked up by aux_source_directory() itself).
-        A no-op if already patched (idempotent, safe to call again on an
-        --incremental rebuild) or if CMakeLists.txt doesn't exist yet.
+        Patch CMakeLists.txt to include USER_COMPILE_SOURCES.
 
         @Parameters
-        app: application component obj (already created, "src" imported).
-        app_name: application folder name under `src`, used only for logging.
+        app: created application component.
+        app_name: application folder name for logging.
         """
         cmakelists_path = path.join(app.component_location, "src", "CMakeLists.txt")
         if not path.isfile(cmakelists_path):
@@ -2296,26 +1503,12 @@ class Workspace:
     def _buildAppWithFlagsRetry(self, app, app_name, desc_suffix="") -> None:
         """
         @Description
-        Build an application component (see quietBuild), transparently
-        working around the Vitis 2025.2 CMAKE_*_FLAGS bug (see
-        _fixCmakeFlags). The generated cache is inspected/fixed after every
-        first build attempt, not just a failed one - Vitis can seed
-        incorrect flags yet still complete for an application that doesn't
-        happen to exercise them, silently producing a binary built without
-        the intended toolchain flags. Whenever the fix-up actually changes
-        something the build is retried once, regardless of whether the
-        first attempt succeeded or failed; if it changes nothing after a
-        failed first attempt, that was a genuine content/compile error, so
-        the original exception propagates as before. Shared by
-        _buildApplication (fresh component) and _rebuildApplicationInPlace
-        (--incremental, reused component), since an app's own
-        build/CMakeCache.txt only exists once its build has actually
-        started, so it can only be fixed reactively either way.
+        Build an app and retry once after a CMake flags fix-up.
 
         @Parameters
-        app: application component obj (already configured/populated).
-        app_name: application folder name under `src`, used only for logging.
-        desc_suffix: appended to the log description, e.g. " (incremental)".
+        app: configured application component.
+        app_name: application folder name for logging.
+        desc_suffix: suffix appended to the build description.
         """
         desc = f"application \"{app_name}\"{desc_suffix}"
         build_error = None
@@ -2324,14 +1517,6 @@ class Workspace:
         except Exception as e:
             build_error = e
 
-        # Inspect/fix the cache after every initial build, not just a
-        # failed one: Vitis can seed incorrect CMAKE_*_FLAGS yet still
-        # complete successfully for an application that happens not to
-        # exercise the missing flags, silently accepting a binary built
-        # without the intended toolchain flags. If the fix-up changed
-        # anything, the build (successful or not) must be retried; if it
-        # didn't and the first build had failed, that was a genuine
-        # content/compile error, so the original exception propagates.
         cache_path = app.component_location + sep + "build" + sep + "CMakeCache.txt"
         if path.isfile(cache_path) and self._fixCmakeFlags(cache_path, desc):
             LOG(f"Retrying {desc} build after the CMAKE_*_FLAGS fix-up...")
@@ -2342,13 +1527,10 @@ class Workspace:
     def _removeTemplateCruft(self, app) -> None:
         """
         @Description
-        Remove files left over by the "empty_application"/psinit template
-        that this repo's checked-in sources always replace/don't need. Split
-        out of _buildApplication to keep that method focused on
-        orchestration.
+        Remove unwanted files left by generated templates.
 
         @Parameters
-        app: app component obj, already populated via app.import_files.
+        app: populated application component.
         """
         for dirpath, dirnames, filenames in walk(app.component_location + sep + "src"):
             for filename in filenames:
@@ -2365,79 +1547,7 @@ class Workspace:
     def checkOutSF(self, platforms=None, apps=None, skip_unbound_platforms=False,
                    incremental=False, allow_process_cleanup=False, assume_yes=False,
                    esw_repo=None) -> int:
-        """
-        @Description
-        Recreate a Vitis workspace from the parent repository's `src`
-        folder. High-level orchestration only, one call per concern:
-        _prepareWorkspace, _discoverAppsAndPlatforms, _extractPlatformMetadata,
-        _buildPlatform (once per detected platform) and _buildApplication
-        (once per detected app), see each for the actual steps.
-
-        When `platforms`/`apps` are both empty/None (the default,
-        full-checkout behavior), the whole workspace is wiped (see
-        _prepareWorkspace) and every detected platform/application is
-        rebuilt from scratch, as before. When either is non-empty, an
-        existing workspace is reused as-is (see _openExistingWorkspace) and
-        only the requested components are deleted/rebuilt: requesting a
-        platform also rebuilds every application bound to it (unless `apps`
-        narrows that down explicitly), and requesting an application also
-        (re)builds the platform it resolves to, if not already targeted.
-        Every other already-built component is left completely untouched -
-        e.g. `--platform my_platform_variant_a` updates that one platform
-        and whatever application uses it, without rebuilding
-        my_platform/my_platform_variant_b or re-wiping the workspace.
-
-        @Parameters
-        platforms: platform names (as derived in _discoverAppsAndPlatforms,
-                  e.g. "my_platform_variant_a") to selectively rebuild, or
-                  None/empty for a full checkout.
-        apps: application folder names under `src` to selectively rebuild,
-             or None/empty for a full checkout.
-        skip_unbound_platforms: if True, don't build any platform that isn't
-                  referenced by at least one application's comp-settings.json
-                  (see _getBoundPlatformNames), regardless of `platforms`/
-                  `apps`/full-checkout mode. A platform named explicitly via
-                  `platforms` is still built even if unbound, since that's an
-                  explicit request.
-        incremental: if True, an already-existing --platform/--app target is
-                  reused in place (see _rebuildPlatformInPlace/
-                  _rebuildApplicationInPlace) - re-synced and rebuilt without
-                  deleting/recreating its component directory first, so
-                  cmake's own incremental build only recompiles what actually
-                  changed. Meant for quick source-edit-and-rebuild cycles;
-                  targets that don't exist yet are always created fresh
-                  regardless of this flag, and any HW/domain-level platform
-                  change still needs a full (non-incremental) rebuild.
-        allow_process_cleanup: if True, _prepareWorkspace/_setWorkspaceWithRetry
-                  are allowed to force-stop pre-existing vitis/vitis-server
-                  processes from the same install when a workspace wipe/select
-                  fails (see stopDanglingVitisProcesses). Off by default: the
-                  OS process list cannot tell an actual leftover from a
-                  crashed run apart from an unrelated, still-active Vitis
-                  session (the workspace is only bound to a running server
-                  through a later gRPC call, never visible on its command
-                  line), so this is opt-in and should only be enabled on a
-                  machine/CI runner where no other Vitis session runs
-                  concurrently.
-        assume_yes: if True, skip _confirmWorkspaceWipe's interactive prompt
-                  and proceed straight to wiping a non-empty workspace on a
-                  full (non-selective) checkout. Off by default so a user
-                  who meant to run checkin.py first (both scripts are
-                  launched the same way, through _vitis.bat/.ps1/.sh) is
-                  warned before un-checked-in workspace changes are
-                  permanently deleted. Only meaningful without --platform/
-                  --app, since a selective rebuild never wipes the workspace.
-        esw_repo: absolute path to a custom embeddedsw checkout, used only
-                  for zynqmp platforms' FSBL build (see _buildZynqMPFsbl)
-                  and $ENV{ESW_REPO} (read by the generated
-                  cortexa53_toolchain.cmake). Optional and off by default:
-                  a user isn't required to maintain a separate embeddedsw
-                  checkout just to check out this workspace, since Vitis
-                  already ships its own bundled embeddedsw copy and uses it
-                  automatically whenever this is None/omitted. Only pass
-                  this to override that bundled copy with a specific
-                  local checkout (e.g. one with custom BSP driver patches).
-        """
+        """Recreate or selectively rebuild the Vitis workspace."""
         platforms = set(platforms or [])
         apps = set(apps or [])
         selective = bool(platforms or apps)
@@ -2454,31 +1564,9 @@ class Workspace:
         repo_path = esw_repo
 
         if repo_path:
-            # Domain/BSP generation resolves its CMake specs file from
-            # $ENV{ESW_REPO} (see the generated cortexa53_toolchain.cmake);
-            # point it at the user-provided embeddedsw checkout before the
-            # Vitis server subprocess is spawned, since it inherits our
-            # process env only at spawn time. Optional: without esw_repo,
-            # $ENV{ESW_REPO} is left untouched and Vitis falls back to
-            # whichever embeddedsw copy ships bundled with the install.
             environ["ESW_REPO"] = repo_path
 
-        # Workaround for a real Vitis 2025.2 bug: the toolchain file Vitis
-        # generates for each domain only sets the non-"_INIT"
-        # CMAKE_<LANG>_FLAGS (with the correct -specs=... needed for newlib
-        # syscall stubs), but CMake's own internal CMakeTestCCompiler
-        # sanity check (run once per fresh BSP build dir, before our flags
-        # are even considered) only honors the "_INIT" variants, which
-        # CMake seeds from $ENV{CFLAGS}/$ENV{LDFLAGS} if set. Without this,
-        # that sanity check can fail with "undefined reference to
-        # _exit/_read/..." depending on unrelated session state. Setting
-        # these ourselves makes the check deterministic regardless.
-        # Only CFLAGS/CXXFLAGS are needed (not LDFLAGS too): CMake's
-        # compiler-test step links via a single combined gcc/g++
-        # invocation, so also setting LDFLAGS to the same value would pass
-        # "-specs=nosys.specs" twice and break gcc's own spec merging
-        # ("attempt to rename spec ... to already defined spec"). CXXFLAGS
-        # is seeded independently of CFLAGS by CMake's C++ compiler test.
+        # Seed compiler-test flags for the Vitis 2025.2 toolchain issue.
         environ["CFLAGS"] = "-specs=nosys.specs"
         environ["CXXFLAGS"] = "-specs=nosys.specs"
 
@@ -2499,19 +1587,11 @@ class Workspace:
                 known_platform_names = {plt["name"] for plt in hw_platforms.values()}
                 unknown_platforms = platforms - known_platform_names
                 if unknown_platforms:
-                    # An unknown --platform value must fail loudly instead
-                    # of silently matching nothing: otherwise the run
-                    # "succeeds" having rebuilt nothing for a typo'd name.
                     LOG(f"Unknown --platform value(s) {sorted(unknown_platforms)}: "
                        f"no such platform among {sorted(known_platform_names)}.")
                     return Workspace.FAILURE
                 unknown_apps = apps - set(app_names)
                 if unknown_apps:
-                    # Same reasoning as unknown_platforms above: an unknown
-                    # --app value would otherwise reach
-                    # _resolveSelectiveTargets, which opens
-                    # src/<value>/comp-settings.json directly and raises an
-                    # unhandled FileNotFoundError instead of failing cleanly.
                     LOG(f"Unknown --app value(s) {sorted(unknown_apps)}: "
                        f"no such application among {sorted(app_names)}.")
                     return Workspace.FAILURE
@@ -2529,24 +1609,9 @@ class Workspace:
             if skip_unbound_platforms:
                 bound_platforms = self._getBoundPlatformNames(app_names, hw_platforms, repo_root)
 
-            # Compute "domains"/"domain_name"/"xpfm" for every platform
-            # up front (pure/no side effects - see _setPlatformDomainInfo),
-            # so every selected app's platform/domain mapping can be
-            # resolved and validated below BEFORE any platform is deleted
-            # or rebuilt. Without this, an app recording an unsupported OS
-            # or a CPU no longer present in the xsa would only be caught
-            # by _appHasValidMapping after the platform loop below had
-            # already mutated the workspace, making the "aborting before
-            # deleting any component" message below false.
             for plt in hw_platforms.values():
                 self._setPlatformDomainInfo(client, plt)
 
-            # Validate every app that will be deleted-and-rebuilt (i.e. not
-            # handled in-place, see `incremental` above) BEFORE deleting any
-            # of them (platform or application): otherwise a later
-            # unresolvable app's failure is only discovered by
-            # _buildApplication after an earlier, previously working
-            # component has already been destroyed.
             rebuild_apps = [
                 app_name for app_name in app_names
                 if not (selective and app_name not in apps)
@@ -2569,41 +1634,16 @@ class Workspace:
                         app_name, comp_settings_paths[app_name], repo_root)
                     ]
                 if non_version_skip_apps:
-                    # At least one app is unresolved for a reason OTHER
-                    # than an already-logged, well-understood version-
-                    # mismatch skip (e.g. a stale/typo'd xsa reference,
-                    # an unsupported OS, a CPU no longer on the
-                    # platform): this is unpredictable enough that
-                    # continuing to delete/rebuild other components
-                    # risks destroying previously-working ones only to
-                    # still fail overall, so abort before touching
-                    # anything, same as before.
                     LOG(f"Aborting before deleting any component: application(s) "
                        f"{non_version_skip_apps} could not be resolved to a platform/domain "
                        f"(see prior log messages).")
                     return Workspace.FAILURE
-                # Every unresolved app here is unresolved ONLY because
-                # its own xsa was cleanly skipped upfront for a version
-                # mismatch (see _filterXsaFilesByVitisVersion / the
-                # "references XSA ... version mismatch" message already
-                # logged above) - not a sign of a wider, unpredictable
-                # problem. Let the checkout continue for every OTHER
-                # app/platform instead of aborting before even starting.
-                # These app(s) are excluded from the rebuild loop below
-                # (see version_skipped_app_names) rather than merely
-                # left to fail there again, so any of their EXISTING
-                # components are left untouched instead of being deleted
-                # only to never get rebuilt. The overall result is still
-                # FAILURE (see all_apps_resolved below), just only after
-                # everything buildable has actually been built.
                 version_skipped_app_names = set(unresolved_apps)
                 LOG(f"Continuing checkout without application(s) {unresolved_apps}: "
                    f"each is bound to an xsa skipped for a Vitis version mismatch.")
 
             for xsa_path, plt in hw_platforms.items():
                 if selective and plt["name"] not in platforms:
-                    # Not being rebuilt, but _buildApplication still needs
-                    # "domain_name"/"xpfm" to bind any requested app to it.
                     self._setPlatformDomainInfo(client, plt)
                     continue
                 explicitly_requested = selective and plt["name"] in platforms
@@ -2612,10 +1652,6 @@ class Workspace:
                     LOG(f"Skipping platform \"{plt['name']}\": not referenced by any "
                        f"application's comp-settings.json (--skip-unbound-platforms)")
                     continue
-                # _buildPlatform may also create a separate "<name>_FSBL" app
-                # component (see _buildZynqMPFsbl, zynquplus only) - both must
-                # be deleted before a rebuild, else create_app_component fails
-                # with "project ...\<name>_FSBL already exists".
                 if incremental and plt["name"] in existing:
                     self._rebuildPlatformInPlace(client, plt)
                 else:
@@ -2630,12 +1666,6 @@ class Workspace:
                 if selective and app_name not in apps:
                     continue
                 if app_name in version_skipped_app_names:
-                    # Don't touch any existing component for this app:
-                    # it's already known (see above) to be unresolvable
-                    # this run only because its own xsa was skipped for
-                    # a version mismatch, so deleting a possibly still-
-                    # good existing component here would destroy it
-                    # without any way to rebuild it this run.
                     LOG(f"Skipping application \"{app_name}\": bound to an "
                        "xsa skipped for a Vitis version mismatch (see "
                        "prior log messages); leaving any existing "
@@ -2652,43 +1682,26 @@ class Workspace:
                         all_apps_resolved = False
 
             if not all_apps_resolved:
-                # At least one application could not be resolved to a
-                # platform/domain (see _buildApplication) and was skipped:
-                # the workspace is incomplete, so callers/CI must be able
-                # to detect this instead of seeing a false success.
                 LOG("Checkout finished with at least one application skipped "
                    "(see prior log messages); workspace is incomplete.")
                 return Workspace.FAILURE
 
             return Workspace.SUCCESS
         finally:
-            # Always dispose the client/server connection, even if an
-            # exception was raised above - otherwise the server process
-            # (and any lock it holds on ws_path) is left dangling for the
-            # next invocation, undermining the retry/dangling-process
-            # handling added elsewhere in this file.
             dispose()
 
     def _getBoundPlatformNames(self, app_names, hw_platforms, repo_root) -> set:
         """
         @Description
-        Determine which platforms (by name) are actually referenced by at
-        least one application's comp-settings.json (see
-        _resolveAppPlatform/getAppPlatformXsa), so checkOutSF's
-        skip_unbound_platforms can avoid building platforms no application
-        currently uses. Considers every detected application regardless of
-        `apps`/`platforms` selection, since "bound" is a property of the
-        whole `src` tree, not of what's currently being selectively rebuilt.
+        Return platform names referenced by at least one app.
 
         @Parameters
-        app_names: every application folder name under `src` (see
-                  _discoverAppsAndPlatforms).
-        hw_platforms: dict produced by _discoverAppsAndPlatforms/
-                     _extractPlatformMetadata.
-        repo_root: absolute path to the parent repository (parent of `src`).
+        app_names: detected application names.
+        hw_platforms: discovered platform metadata.
+        repo_root: absolute repository root.
 
         @Returns
-        set of platform names bound to at least one application.
+        Set of referenced platform names.
         """
         bound = set()
         for app_name in app_names:
@@ -2700,33 +1713,7 @@ class Workspace:
         return bound
 
     def _resolveSelectiveTargets(self, platforms, apps, app_names, hw_platforms, repo_root):
-        """
-        @Description
-        Expand an explicit --platform/--app selective-rebuild request into
-        the full, consistent set of platform/app names that must actually
-        be rebuilt together: requesting a platform pulls in every
-        application bound to it (unless `apps` was also given explicitly,
-        in which case only those are added), and requesting an application
-        pulls in the platform it resolves to. Split out of checkOutSF to
-        keep that method focused on orchestration.
-
-        @Parameters
-        platforms: set of explicitly-requested platform names (may be empty).
-        apps: set of explicitly-requested app names (may be empty).
-        app_names: every application folder name under `src` (see
-                  _discoverAppsAndPlatforms).
-        hw_platforms: dict produced by _discoverAppsAndPlatforms/
-                     _extractPlatformMetadata.
-        repo_root: absolute path to the parent repository (parent of `src`).
-
-        @Returns
-        (platforms, apps) tuple of the expanded sets, or None if an
-        explicitly-requested app's platform/xsa correlation could not be
-        resolved (checkOutSF must fail before mutating any component in
-        that case: continuing would delete the existing app - since it's
-        still a selective rebuild target - without anything to rebuild it
-        with, yet still return success).
-        """
+        """Expand selective rebuild requests into consistent targets."""
         platforms = set(platforms)
         apps = set(apps)
         apps_explicitly_requested = bool(apps)
@@ -2737,7 +1724,7 @@ class Workspace:
             plt = self._resolveAppPlatform(app_name, comp_settings_path, hw_platforms, repo_root)
             if plt is None:
                 LOG(f"Cannot selectively rebuild application \"{app_name}\": its "
-                   f"platform/xsa correlation could not be resolved (see above).")
+                    f"platform/xsa correlation could not be resolved (see above).")
                 return None
             platforms.add(plt["name"])
 
@@ -2754,95 +1741,44 @@ class Workspace:
 if __name__ == "__main__":
     """
     @Description
-    This ~file~ can be used as a module or standalone
-    py program. From a cmd-line: `vitis -s [<relative-or-absolute-path>]checkout.py`,
-    where is the current directory from terminal process does not influence behavior
-    of the above functionalities.
-
-    With no arguments, the whole workspace is wiped and every detected
-    platform/application is rebuilt from scratch (unchanged, full-checkout
-    behavior). --platform/--app (either may be repeated) instead reuse the
-    existing workspace and only rebuild the requested component(s) - see
-    checkOutSF's docstring for the exact expansion rules.
-    --skip-unbound-platforms prunes any platform not referenced by an
-    application's comp-settings.json, in either mode. --incremental, only
-    meaningful together with --platform/--app, rebuilds an already-existing
-    target in place (re-synced sources + cmake's own incremental compile)
-    instead of deleting/recreating its component directory - much faster
-    for a quick source-edit-and-rebuild cycle. A full (non-selective)
-    checkout prompts for confirmation before wiping a non-empty workspace
-    (guards against accidentally running this instead of checkin.py);
-    pass -y/--assume-yes to skip that prompt for unattended/CI runs.
-    --esw-repo is optional and only needed to override the embeddedsw copy
-    bundled with the Vitis install (used for zynqmp platforms' FSBL build);
-    omit it to use that bundled copy, the default.
-    Examples (through _vitis.bat/.ps1/.sh, which forward any extra args
-    here):
+    Run checkout.py as a standalone workspace rebuild script.
+    Use: `vitis -s [<relative-or-absolute-path>]checkout.py [options]`
+    Examples:
         _vitis.bat -v 2025.2 -s .\\checkout.py
-        _vitis.bat -v 2025.2 -s .\\checkout.py -y
-        _vitis.bat -v 2025.2 -s .\\checkout.py --esw-repo C:\\path\\to\\embeddedsw
         _vitis.bat -v 2025.2 -s .\\checkout.py --platform my_platform
         _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app
         _vitis.bat -v 2025.2 -s .\\checkout.py --app my_app --incremental
-        _vitis.bat -v 2025.2 -s .\\checkout.py --skip-unbound-platforms
     """
     parser = argparse.ArgumentParser(
-        description="Recreate (or selectively rebuild) the Vitis workspace from src/."
+        description="Recreate or selectively rebuild the Vitis workspace from src."
         )
     parser.add_argument(
         "--platform", action="append", default=[], metavar="NAME",
-        help="Only rebuild this platform (e.g. my_platform), plus any "
-            "application bound to it, instead of wiping/rebuilding the whole "
-            "workspace. May be repeated. Default: rebuild everything."
+        help="Rebuild this platform and its bound apps only."
         )
     parser.add_argument(
         "--app", action="append", default=[], metavar="NAME",
-        help="Only rebuild this application, plus the platform it resolves to "
-            "(unless already covered by --platform), instead of wiping/rebuilding "
-            "the whole workspace. May be repeated. Default: rebuild everything."
+        help="Rebuild this app and its platform only."
         )
     parser.add_argument(
         "--skip-unbound-platforms", action="store_true",
-        help="Don't build any platform that isn't referenced by at least one "
-            "application's comp-settings.json (see getAppPlatformXsa). A "
-            "platform named explicitly via --platform is still built even if "
-            "unbound, since that's an explicit request."
+        help="Skip platforms not referenced by any app."
         )
     parser.add_argument(
         "--incremental", action="store_true",
-        help="When rebuilding an already-existing --platform/--app target, "
-            "reuse its component in place (re-sync sources + rebuild only) "
-            "instead of deleting and recreating it from scratch, so cmake's "
-            "own incremental build only recompiles what actually changed. "
-            "Targets that don't exist yet are always created fresh. Any "
-            "HW/domain-level platform change still needs a full rebuild."
+        help="Reuse existing targets in place when possible."
         )
     parser.add_argument(
         "--allow-process-cleanup", action="store_true",
-        help="Allow force-stopping pre-existing vitis/vitis-server processes "
-            "from the same install if a workspace wipe/select fails. Off by "
-            "default, since a pre-existing process could be an unrelated, "
-            "still-active Vitis session rather than an actual leftover; only "
-            "enable this on a machine/CI runner where no other Vitis session "
-            "runs concurrently."
+        help="Allow cleanup of stale Vitis processes on failure."
         )
     parser.add_argument(
         "-y", "--assume-yes", action="store_true",
-        help="Skip the interactive confirmation prompt before a full "
-            "(non-selective) checkout wipes a non-empty workspace. Off by "
-            "default: checkin.py and checkout.py are launched the same way, "
-            "so this guards against accidentally running checkout.py (which "
-            "deletes un-checked-in workspace changes) when checkin.py was "
-            "meant instead. Pass this for unattended/CI runs with no "
-            "interactive terminal."
+        help="Skip the full-checkout wipe confirmation prompt."
         )
     parser.add_argument(
         "--esw-repo", default=None, metavar="PATH",
-        help="Absolute path to a custom embeddedsw checkout, used only for "
-            "zynqmp platforms' FSBL build and $ENV{ESW_REPO}. Optional: "
-            "omit this to use whichever embeddedsw copy ships bundled with "
-            "the Vitis install (the default). Only needed to override that "
-            "bundled copy with a specific local checkout."
+        help="Use this embeddedsw checkout for ZynqMP FSBL work."
         )
     args = parser.parse_args()
 
