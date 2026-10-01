@@ -1,17 +1,9 @@
 
 """
-    Company: Digilent RO
-    Engineer: bs
-    Usage: Vitis projects
-    
-    @Description
-    This checkin.py has the same behavior
-    as the previous checkin.tcl. It preserves
-    workspace configuration & source files.
-    
-    @Insights
-    Vitis v2024.1 has Python v3.8.3.
-    Vitis v2025.1 has Python v3.13.0.
+Company: Digilent RO
+Engineer: bs
+Usage: Vitis projects
+@Description Check in Vitis workspace configuration and source files.
 """
 from os import (chdir, getcwd, listdir,
                 path, sep, makedirs, mkdir,
@@ -29,18 +21,7 @@ from misc import (LOG, MapCmdLineOpts)
 class UtilityWS:
     """
     @Description
-    Extract data / Generate data from
-    specific workspace files like *.spfm.
-
-    @Insights
-    comp-settings.json structure (example):
-    {
-        CFLAGS : ["", "", "", ...]
-        TEMPLATE : ["..."],
-        LFLAGS : ["", "", "", ...],
-        PREV_BUILDSTATUS : ["Valid"],
-        PART : ["<part-number>"]
-    }
+    Manage workspace metadata helpers.
     """
     srvCl = None
     EMPTY_BUFFER = 0
@@ -60,30 +41,19 @@ class UtilityWS:
     def __init__(self, sIP="", sPort=""):
         """
         @Description
-        This file has its location directory as the starting point,
-        then `src`, `ws` need to exist before any checkin flow to
-        happen. If these have not been created by default on a branch,
-        all the checkin flow would be bypassed, then logging some Warning
-        Message into default <stream-buff>, default is cmd-line.
+        Initialize workspace paths and the local Vitis server.
 
-        Other files are stored in self._lfConf that have valuable data for
-        platform/project. Through vitis-py resources or custom logic can be
-        extracted, this depends on what other features checkin flow needs
-        to have. Class dependent variables are set, like COMP_TYPES, srvCl,
-        these are `utilities` for vitis-workspaces.
+        @Parameters
+        sIP: Optional server host override.
+        sPort: Optional server port override.
         """
-        # Always have a reference wd.
+        # Working directory.
         self._wDir = path.dirname(path.realpath(__file__))
-        # os.sep ~ platform dependent;
         self._pSubSw = self._wDir[:self._wDir.rfind(sep)]
         chdir(self._pSubSw)
-        # Can be changed to other dir (new or existent);
         self._srcDir = "src"
-        # App or prj ?
-        # Set path for win/lnx "\\" or "/"; Use py-stdlib
-        # functions to avoid manually use/change these OS differences.
+        # Workspace apps live under "ws".
         self._appDir = "ws"
-        # '*' -> Substitute with platform name (example only), <vitis-comp>.json;
         self._lfConf = ["*.xpfm", "*.json", "*.cmake",
                         "*.yaml", "qemu_args.txt", "*.spfm",
                         "*.cfg"
@@ -92,22 +62,18 @@ class UtilityWS:
         self.dConfWs = {}
         self._dPltAppCorr = {}
         self.enJsonObjFile = JSONEncoder(indent="\t", separators=(",", " : "))
-        # Check for src and ws dirs.
         lcWsDir = path.join(self._pSubSw, self._appDir)
         self.kwCLO = {}
-        # Extract cmd line parameters into kwCLO.
         MapCmdLineOpts(kwCLO=self.kwCLO)
         self.sIP = self.kwCLO["--ip"] if sIP == "" else sIP
         self.sPort = self.kwCLO["--port"] if sPort == "" else sPort
         if self.sIP != "" or self.sPort != "":
             UtilityWS.SET_IP_PORT = True
-        # Server attributes can be used to attach to an existing server made
-        # with Server class from vitis._server.
+        # Reuse or start the workspace server.
         if path.isdir(self._srcDir) and path.isdir(self._appDir):
             if UtilityWS.srvCl is None:
                 try:
                     LOG(msg="Local server, starting Vitis server...")
-                    # Init server with pre-defined args.
                     UtilityWS.srvCl = _server.Server(
                         port=None if self.sPort == "" else self.sPort,
                         host="localhost" if self.sIP == "" else self.sIP,
@@ -123,33 +89,20 @@ class UtilityWS:
                    ) -> int:
         """
         @Description
-        Prepare build/ws metadata to be saved into a json file for
-        each existent application. Get <app-dirname> with rfind +
-        sep tweaks to create json file under it after data is
-        prepared with self.prepDataStruct(). Module json has encoder +
-        decoder classes to get/set json data structure, this format has
-        been choosen because vitis generates similar files.
+        Write comp-settings.json for each application.
 
         @Parameters
-        bdRes: List with build chace representative structure.
-        location: Where the self.wsJsonConf will be saved.
+        bdRes: Build metadata returned by vitis-py.
+        locations: Application directories to process.
         """
         idx = 0
         for location in locations:
-            # Save apps/platforms into a json dt at checkin, with
-            # flags, template !!, processor, target, ... etc.
             dirApp = location[location.rfind(sep) + 1:]
             sPrevWd = getcwd()
             chdir(dirApp)
-            # Reset per-application: self.dConfWs is reused across every
-            # location in this loop, so a setting present for a previous
-            # app but absent from this one's obj.settings must not survive
-            # (previously only the dirApp correlation key was cleared
-            # below, leaking every other stale setting into this app's
-            # generated comp-settings.json).
+            # Reset per-application state.
             self.dConfWs = {}
             iRet = self.prepDataStruct(bdRes[idx])
-            # Add relative path to json settings.
             self.dConfWs[dirApp] = self._dPltAppCorr[dirApp]
             if iRet != UtilityWS.FAILURE:
                 sFConfWs = self.enJsonObjFile.encode(self.dConfWs)
@@ -169,26 +122,15 @@ class UtilityWS:
                        ) -> int:
         """
         @Description
-        Only with a debugger it's easy to profile/study the nested data
-        structure the obj parameter will hold. The below logic is depenent on
-        obj, obj.settings is a subclass of type(obj), item.(key or value) are
-        string, list respectively. len() or item.value.__len__() function can be
-        used, item.value.__getitem__(idx) is class dependent, but can have an
-        equivalent. Some item.value are of dim=0, so empty list is stored.
+        Normalize vitis-py settings into self.dConfWs.
 
         @Parameters
-        obj: The type of this item is dependent on vitis-py resources,
-             it consists of a nested data structure.
+        obj: Nested vitis-py settings object.
         """
-        # The separator used is similar to lnx platforms for item.value items.
         PTRN_EX = compile(escape("../"), RegexFlag.IGNORECASE)
-        # Extract from a protobuff class metadata.
         for item in obj.settings:
             if len(item.value) != UtilityWS.EMPTY_BUFFER:
-                # Drop any parent-relative ("../") entries wherever they
-                # occur, regardless of how many values this setting has -
-                # a single such entry is just as wrong to keep as one
-                # among several.
+                # Skip parent-relative entries.
                 valLoc = [v for v in item.value if PTRN_EX.search(v) is None]
                 if len(valLoc) == 1:
                     valLoc = valLoc[0]
@@ -230,35 +172,27 @@ class UtilityWS:
 class ConfigWS:
     """
     @Description
-    Extract metadata with vitis tools,
-    process them here and use them where it's needed.
+    Wrap vitis build metadata collection.
     """
     def __init__(self,
                  lApps : list = None
                  ):
         """
         @Description
-        This unit is mainly used to interact with vitis-py resources to
-        extract different data from auto generated files. In some cases,
-        it's easier to implement an indepentend logic for a certain feature.
+        Prepare vitis-py access for application configs.
 
-        @Insights
-        Apps are more important to have them stored.
-        Not all vitis-py resources are easily to be used.
-        From vitis :: component.py: get_app_config, set_sysroot, get_config_info,
-                      get_ld_script, ... .
-        Check out more resources from vitis-tools to encode medata into config_ws.json.
+        @Parameters
+        lApps: Optional application directory list.
         """
         self._utilCfgWs = UtilityWS()
         self.bdComp = _build.Build(server=UtilityWS.srvCl)
-        # Store all configs from apps.
         self._bdRes = []
-        # Py makes here a reference automatically, _ref<...> just for intuitive distinction.
         self._refLApps = []
         if UtilityWS.IS_DIRS and lApps is not None:
             self.setApps(lApps)
 
     def setApps(self, lApps : list) -> None:
+        """Load Vitis app configs for the provided app list."""
         self._refLApps = lApps
         for item in lApps:
             self._bdRes.append(
@@ -290,28 +224,15 @@ class ConfigWS:
 class SrcFilesWS:
     """
     @Description
-    Copy apps source files into local dir 'src'
-    that is present in all projects branches.
+    Collect and copy checked-in workspace files.
     """
-    # Consts
     BUILD_FILE_IDX = 0
     COMP_FILE_IDX = 1
-    # Predef vectors - some files need to have a standard name.
-    # Note :: First and last item are always excluded.
+    # Standard config filenames.
     lsConfCpy = ["CMakeLists.txt", "vitis-comp.json", "*.cmake",
                  "*.ld", "Makefile", ".gitignore"
                  ]
-    # Entries that can appear directly under an app's workspace <app>/src
-    # dir that are Vitis-generated metadata, never actual application
-    # source (mirrors checkout.py's _pruneStaleFiles rationale/set for the
-    # same directory level - CMakeLists.txt is excluded separately below,
-    # since it's already tracked as this app's own build file). Files not
-    # listed here are gathered unconditionally (see gatherAppSrcCd): a
-    # fixed extension allowlist previously stood in for this set, silently
-    # dropping any valid file whose extension it did not anticipate (e.g.
-    # ".hh"/".hxx" headers, ".inc" fragments, or binary assets), and - since
-    # that same list drove cpySrcFiles' stale-file pruning - deleting any
-    # such file's already checked-in copy on a repeated check-in.
+    # Vitis-generated top-level entries under an app's src dir.
     VITIS_GENERATED_SRC_ENTRIES = frozenset({
         "vitis-comp.json", "UserConfig.cmake", "app.yaml",
         ".clangd", "compile_commands.json", ".compile_commands"
@@ -320,36 +241,21 @@ class SrcFilesWS:
     FAILURE = -1
     SUCCESS = 0
     APP_SRCCODE = "src"
-    # Manifest written by checkout.py (_buildPlatform) into a platform's
-    # workspace component dir, recording the original "src" folder name the
-    # xsa was checked out from (see checkout.py's ".digilent_source_dir").
+    # checkout.py manifest for the checked-in platform src dir name.
     SRC_DIR_MANIFEST = ".digilent_source_dir"
 
     def __init__(self):
         """
         @Description
-        Init base vectors that will hold paths to build, handoff, platform-dir,
-        and app-src paths, these are important for preserving workspace for
-        Vitis >= 2023.2. Getter are provided to take references to below lists,
-        making them usable in other contexts.
+        Initialize file collections used during check-in.
         """
         self.utilSFWs = UtilityWS()
-        # There are other extensions, check for a pattern if one is not in the below list.
-        # Path(s) of build-system script;
         self._lsBldFl = []
-        # Path(s) of xsa files;
         self._lsArchFl = []
-        # Dir(s) for platforms (workspace component/xsa-stem names, used to
-        # correlate an app's recorded ".xpfm" reference back to its xsa);
+        # Workspace platform component names.
         self._lsArchPltDir = []
-        # Dir(s) to check the platform's xsa file INTO under src (the
-        # original source folder name, when checkout recorded one via
-        # ".digilent_source_dir"; falls back to the workspace component
-        # name otherwise). May differ from lsArchPltDir when the workspace
-        # component name and the original checked-in folder name diverge
-        # (e.g. platform disambiguation renamed the xsa stem).
+        # Checked-in platform dir names under src.
         self._lsArchSrcDir = []
-        # Buffer to store Path(s) of src files;
         self._lsTempSrcFl = []
 
     @property
@@ -377,86 +283,47 @@ class SrcFilesWS:
                         ) -> int:
         """
         @Description
-        Only in this function (+ self.cpySrcFiles, or others if the code is extended)
-        are files copied through copy or copy2 stdlib functions. Keep things
-        well structured to not make mistakes. Before copying files, some conditions
-        need to be respected otherwise stdlib functions may raise exceptions.
-
-        path.join function is mainly used to create paths that are system
-        dependent, in some cases os.sep (separator) is used. Nr of platforms
-        should be lower than that of applications of equal, but this case is treated
-        anyway. Different tweaks with rfind and itemIdx are implemented to extract from
-        lApps a certain path, in this function it is <app-dirname>.
-
-        self.lsBldFl and self.lsArchFl contain paths to build, xsa files, these are copied
-        directly within this function, but others are in self.cpySrcFiles to not have
-        ultimately a large function. In case this function has copied everything we need
-        it returns 0, otherwise -1 if some error occured. The error must not exit the program
-        randomly, but close it without any undefined behavor.
+        Copy build, source, and platform files into src.
 
         @Parameters
-        lApps: ref to matrix with paths of files to be copied.
+        lApps: Application directory list.
         """
         if lApps is None:
             return SrcFilesWS.FAILURE
         pTemp = path.join(self.utilSFWs.pSubSw, SrcFilesWS.APP_SRCCODE)
         dimLsBldFl = len(self.lsBldFl)
         dimLsArchFl = len(self.lsArchFl)
-        # Fail only when there is truly nothing to check in: an unbound
-        # platform with no application (dimLsBldFl == 0) is an explicitly
-        # supported, valid workspace (see the independent platform-copy
-        # loop below), so it must not be rejected here before that loop
-        # ever gets to run.
+        # Allow platform-only workspaces.
         if (dimLsBldFl == UtilityWS.EMPTY_BUFFER and
             dimLsArchFl == UtilityWS.EMPTY_BUFFER
             ):
             return SrcFilesWS.FAILURE
         elif path.isdir(pTemp) is True:
-            # Copy files into 'src' dir.
             chdir(pTemp)
-            # Applications drive lApps/self.lsBldFl (1:1 by construction).
             for itemIdx in range(0, dimLsBldFl):
                 strTempLoc = lApps[itemIdx][lApps[itemIdx].rfind(sep) + 1:]
                 dTempLoc = path.join(strTempLoc, SrcFilesWS.APP_SRCCODE)
-                # In py <= 3.8, certain modes for mkdir does not exist, so default one is used.
                 if path.isdir(dTempLoc) is not True:
                     makedirs(dTempLoc)
-                # Add owner read/write without dropping any existing
-                # exec/group/other bits (copy() propagates this mode).
+                # Preserve existing mode bits when enabling owner rw.
                 chmod(self.lsBldFl[itemIdx], stat(self.lsBldFl[itemIdx]).st_mode | S_IRUSR | S_IWUSR)
-                # Check for write protected file in self.lsBldFl.
                 if access(self.lsBldFl[itemIdx], R_OK | W_OK):
-                    # Should we use copy2 to preserve metadata instead of copy ?
                     copy(self.lsBldFl[itemIdx], dTempLoc)
                 else:
                     LOG(f"File {self.lsBldFl[itemIdx]} is not writable and readable")
-                # tuple(<app-dirname-src>, <app-dirname>)
                 iRet = self.cpySrcFiles(itemIdx, lApps, (dTempLoc, strTempLoc))
-            # Platforms (XSA handoff files): copied independently of the
-            # application count/loop above, since a workspace can contain
-            # more platforms than applications (e.g. an intentionally
-            # unbound platform kept via --skip-unbound-platforms).
-            # Multiple platforms can share one destination "src" dir
-            # (valid XSA variants); precompute the still-current basenames
-            # per dir so stale-cleanup below never deletes a variant.
+            # Copy XSA files independently from application count.
             validXsaByDestDir = {}
             for pltIdx in range(0, dimLsArchFl):
                 validXsaByDestDir.setdefault(self.lsArchSrcDir[pltIdx], set()).add(
                     path.basename(self.lsArchFl[pltIdx]))
             for pltIdx in range(0, dimLsArchFl):
-                # Destination dir preserves the original checked-in "src"
-                # folder name across renames of the workspace platform
-                # component (see findPlatforms/lsArchSrcDir); using the
-                # workspace name directly here would create a brand-new
-                # dir and orphan the original one whenever they diverge.
+                # Keep the original checked-in platform dir name.
                 destPltDir = self.lsArchSrcDir[pltIdx]
                 if path.isdir(destPltDir) is not True:
                     mkdir(destPltDir)
                 else:
-                    # Remove checked-in XSA(s) no longer current for this
-                    # dir (e.g. renamed export), skipping any name still
-                    # valid for another platform sharing this dir, so
-                    # variants aren't deleted by each other's pass.
+                    # Remove stale XSA files without deleting valid variants.
                     validNames = validXsaByDestDir[destPltDir]
                     for existing in listdir(destPltDir):
                         if (existing.lower().endswith(".xsa")
@@ -464,15 +331,12 @@ class SrcFilesWS:
                             stalePath = path.join(destPltDir, existing)
                             remove(stalePath)
                             LOG(f"Removed stale checked-in XSA: {stalePath}")
-                # Add owner read/write without dropping any existing
-                # exec/group/other bits (copy() propagates this mode).
+                # Preserve existing mode bits when enabling owner rw.
                 chmod(self.lsArchFl[pltIdx], stat(self.lsArchFl[pltIdx]).st_mode | S_IRUSR | S_IWUSR)
-                # Check for write protected file in self.lsArchFl.
                 if access(self.lsArchFl[pltIdx], R_OK | W_OK):
                     copy(self.lsArchFl[pltIdx], destPltDir)
                 else:
                     LOG(f"File {self.lsArchFl[pltIdx]} is not writable and readable")
-            # Handoff (xsa) and build script files have been copied, src files too.
             LOG(f"Matching directories have been created in sw{sep}src")
             return SrcFilesWS.SUCCESS
         else:
@@ -484,72 +348,23 @@ class SrcFilesWS:
                     locDuo : tuple
                     ) -> int:
         """
-        @Description
-        Current function is called in self.collectCpyFiles to divide
-        some steps and limit function code. In this one, files corresponding
-        to an application type are copied to 'src-<app-dirname>', <app-dirname>
-        and <default-src> come in tuple form `locDuo`, because there can be some
-        files which should be put in <app-dirname>, not <src>.
-
-        srcDirLoc and LocFMisc are equal only when a file needs to be copied
-        into <app-dirname>, like `.gitignore`, but these type of files are excluded
-        by default (check out gatherAppOtherConf from Workspace which has repflOpt
-        on False implicitly). Each file type is stored into a list, which will be
-        iterated over with below 2x for structure.
-
-        path.relpath against <app-dir-src> (lApps[appIdx] + APP_SRCCODE) is used to
-        recover the *full* subdirectory chain that needs to be recreated under
-        <app-dirname-src>, no matter how many levels deep a file is nested
-        (e.g. src/utils/<any-further-nesting>/foo.c), not just the immediate
-        parent dir. The one exception is an extra module directory (e.g.
-        "my_shared_module", a small shared driver module) - the workspace
-        nests it one level inside the component's own "src"
-        (<app-dir-src>/<module>/...), matching where checkout.py's
-        _importAppExtraModules put it, but it's checked in as a SIBLING of
-        <app-dirname-src> instead, at <app-dirname>/<module>/..., per the
-        checkout-side manifest (.digilent_extra_modules) recorded at the
-        component root. makedirs (instead of mkdir) is used since more than
-        one intermediate directory level may need to be created at once. If
-        directories have been already created, then calling `makedirs` is
-        avoided.
-
+        @Description Copy one application's gathered source files.
         @Parameters
-        appIdx: integer for App(s) files.
-        lApps: matrix with paths of files to be copied.
-        locDuo: tuple with <app-dirname-src> on left, <app-dirname> on right ~ pair like.
+        appIdx: Application index.
+        lApps: Application directory list.
+        locDuo: App src dir and app root dir destinations.
         """
-        # item ~ list
-        # e.g. appIdx=0 is for App1.
         loc, locFMisc = locDuo
         appSrcRoot = path.join(lApps[appIdx], SrcFilesWS.APP_SRCCODE)
-        # Extra module directories (see checkout.py's _importAppExtraModules)
-        # are imported into the workspace nested one level inside the
-        # component's own "src" (<component>/src/<module>/...), but are
-        # checked in as a SIBLING of the app's own "src" folder, at
-        # src/<app-dirname>/<module>/... - not inside it. Read back the
-        # manifest checkout.py writes at the component root
-        # (.digilent_extra_modules, see _writeExtraModulesManifest) so
-        # those top-level directory names can be redirected to locFMisc
-        # (the app root) instead of being nested under loc like ordinary
-        # source files.
+        # Extra modules live beside the app src dir in the checked-in tree.
         extraModuleNames = set()
         manifestPath = path.join(lApps[appIdx], ".digilent_extra_modules")
         if path.isfile(manifestPath):
             with open(manifestPath, "r", encoding="utf-8") as f:
                 extraModuleNames = {line.strip() for line in f if line.strip()}
-        # Reconcile <app-dirname-src> (loc) against what will actually be
-        # (re)copied this run: a repeated check-in must also remove any
-        # previously checked-in source file whose workspace counterpart was
-        # deleted/renamed since the last check-in, otherwise a later
-        # checkout keeps restoring (and compiling) the stale copy forever.
+        # Remove stale checked-in files on repeated check-ins.
         keepRelPaths = set()
-        # Same reconciliation, but per extra module (see the docstring
-        # above): each module's checked-in destination is
-        # <app-dirname>/<module>, a SEPARATE directory from loc, so it
-        # needs its own keep-set/prune pass below - otherwise a file
-        # deleted/renamed inside a workspace extra module was never
-        # pruned here, and the next checkout kept restoring/compiling the
-        # stale sibling-module copy forever.
+        # Track stale-file cleanup separately for extra modules.
         moduleKeepRelPaths = {}
         for item in self._lsTempSrcFl[appIdx]:
             for subItem in item:
@@ -560,11 +375,7 @@ class SrcFilesWS:
                         moduleKeepRelPaths.setdefault(moduleName, set()).add(moduleRelPath)
                     else:
                         keepRelPaths.add(relPath)
-        # collectCpyFiles already (re)copied this app's build file (e.g.
-        # CMakeLists.txt) directly into loc, right before calling this
-        # function - it lives outside _lsTempSrcFl, so without this it
-        # would immediately be treated as "no longer present" and deleted
-        # by the pruning loop below on every check-in.
+        # Preserve the build file copied by collectCpyFiles.
         keepRelPaths.add(path.basename(self.lsBldFl[appIdx]))
         if path.isdir(loc):
             for dirpath, _, filenames in walk(loc):
@@ -590,8 +401,6 @@ class SrcFilesWS:
                            f"no longer present in the workspace: {destAbs}")
         for item in self._lsTempSrcFl[appIdx]:
             for subItem in item:
-                # Take all files from each sublist and copy them, preserving
-                # any nr of nested dirs found between <app-dir-src> and a file.
                 miscFileName = subItem[subItem.rfind(sep) + 1:]
                 destRoot = loc
                 inAppSrcRoot = subItem.startswith(appSrcRoot + sep)
@@ -601,32 +410,22 @@ class SrcFilesWS:
                         destRoot = locFMisc
                     relDirLoc = path.dirname(relPath)
                 else:
-                    # File is not under <app-dir>/src (e.g. .gitignore sitting
-                    # directly in <app-dirname>), handled by the misc case below.
                     relDirLoc = ""
                 if relDirLoc not in ("", "."):
                     nLoc = path.join(destRoot, relDirLoc)
                     if path.isdir(nLoc) is not True:
                         makedirs(nLoc)
-                    # Add owner read/write without dropping any existing
-                    # exec/group/other bits (copy() propagates this mode).
+                    # Preserve existing mode bits when enabling owner rw.
                     chmod(subItem, stat(subItem).st_mode | S_IRUSR | S_IWUSR)
-                    # Check for write protected file
                     if access(subItem, R_OK | W_OK):
                         copy(subItem, nLoc)
                     else:
                         LOG(f"File {subItem} is not writeable and readable")
                     continue
-                # Add owner read/write without dropping any existing
-                # exec/group/other bits (copy() propagates this mode).
+                # Preserve existing mode bits when enabling owner rw.
                 chmod(subItem, stat(subItem).st_mode | S_IRUSR | S_IWUSR)
-                # Check for write protected file
                 if access(subItem, R_OK | W_OK):
-                    # Only a file gathered from OUTSIDE appSrcRoot (e.g. a
-                    # dotfile sitting directly in <app-dirname>) uses the
-                    # misc destination: a dotfile at the top of the app's
-                    # own "src" folder is a real source file and must stay
-                    # in loc, the only dir checkout.py re-imports.
+                    # Top-level app dotfiles stay beside src.
                     if not inAppSrcRoot and miscFileName.startswith("."):
                         copy(subItem, locFMisc)
                     else:
@@ -688,59 +487,31 @@ class SrcFilesWS:
 class Workspace:
     """
     @Description
-    Extract/Store different files that
-    are in every WS made with vitis >= v2023.2.
+    Coordinate workspace discovery and check-in.
     """
 
     def __init__(self):
         """
         @Description
-        Search and Store platforms, then applications, these functions should
-        be linked with an attribute that will be added to <comp-settings>.json
-        later, Applications[attr] <-> Platforms[attr]. #...
-
-        Attributes self.sfWs and self.cfgWs hold data that needs to be copied/processed,
-        from self.cfgWs different settings are preserved + references to <apps-dirname>.
-        Both have setters/getters methods that are used to access various class dependent
-        attributes (SrcFilesWS or ConfigWS) by reference, not redundant copies.
+        Discover platforms and applications for the workspace.
         """
         self.idxApp = 0
         self.sfWs = SrcFilesWS()
-        # pattern vector; /i -> case insensitive; matches the generated
-        # boot component's exact "<platform>_FSBL" suffix (see checkout.py's
-        # _buildZynqMPFsbl), not merely any name containing "fsbl" anywhere
-        # (which would wrongly exclude e.g. a user app named "fsblinky_test").
+        # Match only generated "<platform>_FSBL" components.
         self.lsExcludedApps = [compile(r"_fsbl$", RegexFlag.IGNORECASE)]
-        # Set by processGatherFiles when an app's platform xsa could not be
-        # resolved: checkInSF checks this and fails instead of writing a
-        # comp-settings.json with a synthesized, known-nonexistent xsa path.
+        # Fail the run if a platform/XSA correlation cannot be resolved.
         self.bPlatformResolutionFailed = False
-        # Set by processGatherFiles when an app is skipped for being an HLS
-        # component or a non-"standalone" OS (see its docstring): unlike
-        # bPlatformResolutionFailed, this does NOT abort the run early -
-        # those apps are routinely, expectedly unsupported (must be
-        # checked in/managed separately) and every other app/platform must
-        # still be checked in normally. checkInSF instead downgrades an
-        # otherwise-successful result to FAILURE at the very end, so a
-        # caller/CI cannot mistake this partial backup for a complete one.
+        # Track unsupported apps that make the backup incomplete.
         self.bIncompleteCheckIn = False
         if UtilityWS.IS_DIRS:
             try:
                 self.findPlatforms()
-                # Set multiple Utility ... ? 'fa(), ...'
-                # ~ Set ConfigWS paths for platforms too ~
                 self.cfgWs = ConfigWS()
                 _lApps = self.findApplications()
                 self.cfgWs.setApps(_lApps)
                 LOG("All files have been collected!")
             except Exception:
-                # self.sfWs = SrcFilesWS() above already started the local
-                # Vitis server (see UtilityWS.__init__), before checkInSF's
-                # own try/finally exists to stop it on the way out. Without
-                # this, any JSON/filesystem/Vitis error raised by
-                # findPlatforms/findApplications would leave that server
-                # process and its workspace lock dangling, since checkInSF
-                # (and its shutdown finally) is never reached.
+                # Stop the server on construction-time failures.
                 if UtilityWS.srvCl is not None and not UtilityWS.SET_IP_PORT:
                     LOG("Stopping Vitis server after a construction-time error...")
                     UtilityWS.srvCl.stop()
@@ -751,25 +522,10 @@ class Workspace:
                        ):
         """
         @Description
-        Store in a list which is associated with an app, all the files
-        that need to be copied to <sw-src>. Every regular file found under
-        <app-dir>/src is gathered recursively, except this app's own build
-        file (already tracked separately, see collectCpyFiles/lsBldFl) and
-        a defined set of Vitis-generated metadata entries that can appear
-        directly at this level alongside real source (see
-        VITIS_GENERATED_SRC_ENTRIES).
-
-        Walking the whole tree instead of matching only a fixed extension
-        allowlist (the previous per-extension rglob loop, SrcFilesWS.
-        lsSrcCpy) means a file whose extension that allowlist never
-        anticipated (e.g. ".hh"/".hxx" headers, ".inc" fragments, binary
-        assets) is no longer silently skipped - which, since this same
-        file set also drives cpySrcFiles' stale-file pruning, previously
-        deleted such a file's already checked-in copy on a repeated
-        check-in.
+        Gather one app's source files under src.
 
         @Parameters
-        pSrcFl: Path to src dir from <app-dir>.
+        pSrcFl: Application directory path.
         """
         pSrcFlLoc = path.join(pSrcFl, SrcFilesWS.APP_SRCCODE)
         buildFilePath = path.normpath(self.sfWs.lsBldFl[self.idxApp])
@@ -787,10 +543,7 @@ class Workspace:
                     continue
                 srcFiles.append(fullPath)
         if len(srcFiles) != UtilityWS.EMPTY_BUFFER:
-            # [[]] - type
             self.sfWs.lsTempSrcFl[self.idxApp].append(srcFiles)
-        # [[App1],[App2],[App3], ...], where App1,App2,App3 are other lists with
-        # paths of source files that need to be copied.
 
     def gatherAppOtherConf(self,
                            pSrcFl : str,
@@ -798,21 +551,13 @@ class Workspace:
                            ):
         """
         @Description
-        Adds pSrcFl's own top-level ".gitignore" (SrcFilesWS.lsConfCpy[-1])
-        to self.sfWs.lsTempSrcFl when repflOpt is set: it lives directly
-        under <app-dirname>, not under <app-dirname>/src, so gatherAppSrcCd
-        never encounters it. Everything under <app-dirname>/src itself
-        (e.g. "*.cmake"/"*.ld"/Makefile files previously matched here by
-        name) is now gathered unconditionally by gatherAppSrcCd instead of
-        matched against a fixed allowlist in this function.
+        Gather top-level app files handled outside src.
 
         @Parameters
-        pSrcFl: Path to src dir from <app-dir>.
-        repflOpt: By default it is on '0', this avoids storing
-                  files like .gitignore, but others can be added/ignored.
+        pSrcFl: Application directory path.
+        repflOpt: Include the app-level .gitignore when True.
         """
         if len(self.sfWs.lsTempSrcFl[self.idxApp]) != UtilityWS.EMPTY_BUFFER:
-            # Source files should have been stored by now.
             if repflOpt:
                 pGIgn = path.join(pSrcFl, SrcFilesWS.lsConfCpy[-1])
                 if path.exists(pGIgn) is True:
@@ -821,17 +566,10 @@ class Workspace:
     def _removeStaleCheckedInApp(self, appName : str) -> None:
         """
         @Description
-        Delete this app's previously checked-in "<sw>/src/<appName>" copy,
-        if any. Called when processGatherFiles decides an app can no
-        longer be checked in (e.g. its type/OS changed to something
-        unsupported): without this, a stale copy from an earlier, still-
-        supported check-in would otherwise be left untouched, and
-        checkout.py would keep recreating that stale/incompatible
-        application on every future checkout while this check-in still
-        reports success.
+        Remove a stale checked-in app copy if it exists.
 
         @Parameters
-        appName: workspace component directory name of the app to remove.
+        appName: Workspace component directory name.
         """
         staleDir = path.join(self.sfWs.pSubSw, SrcFilesWS.APP_SRCCODE, appName)
         if path.isdir(staleDir):
@@ -846,31 +584,16 @@ class Workspace:
                            lsDirApps : list
                            ) -> int:
         """
-        @Description
-        Filter Vitis applications files, gather source files + other configs,
-        findApplications uses it, but functions should have a limited no. or lines.
-        Check description from it.
-
-        Only "standalone" (bare-metal) applications are checked in: checkout.py
-        only ever reconstructs "standalone" domains (see _buildPlatform), and
-        an actual Linux application needs a "linux" domain/template plus a
-        sysroot, none of which these scripts set up. Silently checking such
-        an app in anyway would let a later checkout rebuild it against a
-        standalone BSP instead, replacing its real target without any
-        indication something went wrong - so it is rejected here instead
-        (see dJsonData["os"], vitis-comp.json's own recorded OS). HLS
-        components ("type" == "HLS") are excluded outright, not just
-        redirected to the "standalone" path: they are not application
-        components, may lack the "platform"/"os" fields read below, and
-        checkout.py always recreates any accepted component with
-        create_app_component(..., template="empty_application"), so an
-        HLS component could never round-trip correctly anyway.
+        @Description Filter one app and gather its checked-in files.
+        @Parameters
+        cmpFile: Matching vitis-comp.json locations.
+        dJsonData: Decoded component metadata.
+        pItem: Workspace component directory.
+        lsDirApps: Collected application directories.
         """
         NOT_PATH = -1
         if dJsonData["type"] == "HLS":
-            # TODO: add a dedicated HLS check-in/checkout round-trip path
-            # (HLS components use their own kernel template/build flow,
-            # not "empty_application") instead of excluding them outright.
+            # HLS check-in needs a separate round-trip flow.
             appName = pItem[pItem.rfind(sep) + 1:]
             LOG(f"Skipping application \"{appName}\": HLS components are not "
                f"bare-metal applications and checkout.py has no dedicated HLS "
@@ -885,9 +608,7 @@ class Workspace:
             appName = pItem[pItem.rfind(sep) + 1:]
             appOs = dJsonData.get("os", "standalone")
             if appOs != "standalone":
-                # TODO: add real non-"standalone" (e.g. "linux") app
-                # support - a "linux" domain/template plus sysroot setup
-                # on the checkout.py side - instead of rejecting here.
+                # Non-standalone apps need dedicated checkout support.
                 LOG(f"Skipping application \"{appName}\": checking in a "
                    f"\"{appOs}\" application is not supported (checkout.py "
                    f"only reconstructs \"standalone\" bare-metal domains); "
@@ -896,78 +617,42 @@ class Workspace:
                 self.bIncompleteCheckIn = True
                 return
             lHwPlt = dJsonData["platform"]
-            # This idx has two uses, one for path like values in "platform"
-            # and the second one if there is directly the name of platform.
+            # Handle both "<path>.xpfm" and plain platform-name values.
             idxIfExXpfm = lHwPlt.rfind(".")
-            # Path to .xpfm file only if it exists, can be used if it's -1 though
             idxPltName = lHwPlt.rfind(sep)
             if idxPltName == NOT_PATH and idxIfExXpfm == NOT_PATH:
-                # Overwrite if necessary
                 idxIfExXpfm = len(lHwPlt)
             pltName = lHwPlt[idxPltName + 1:idxIfExXpfm]
-            # Pay attention which Utility object is used, bcs encJSON_Ws depends on it.
-            # Look up the actual XSA discovered for this platform (see
-            # findPlatforms) instead of assuming its filename matches the
-            # platform name: checkout disambiguates duplicate XSA stems by
-            # renaming the *platform*, so the real XSA basename can differ,
-            # and a synthesized "<platform>.xsa" guess can point nowhere.
+            # Use discovered XSA metadata instead of guessed filenames.
             relPathPlt = None
             for archIdx, archPltDir in enumerate(self.sfWs.lsArchPltDir):
                 if archPltDir == pltName:
                     actualXsaName = path.basename(self.sfWs.lsArchFl[archIdx])
-                    # Use the actual checked-in destination directory (see
-                    # findPlatforms/lsArchSrcDir), not the workspace
-                    # platform name: when they diverge (e.g. checkout
-                    # disambiguated the platform's own name from its
-                    # original "src" folder), pltName points nowhere under
-                    # the checked-in src tree the next checkout will see.
+                    # Use the checked-in platform dir, not the workspace name.
                     destDir = self.sfWs.lsArchSrcDir[archIdx]
                     relPathPlt = SrcFilesWS.APP_SRCCODE + sep + destDir + sep + actualXsaName
                     break
             if relPathPlt is None:
-                # Do not synthesize a guessed path here: it is already
-                # known not to exist (findPlatforms did not discover this
-                # platform), and writing it into comp-settings.json would
-                # let check-in report success while producing a backup
-                # checkout.py can never resolve. Fail check-in instead.
+                # Fail instead of writing a known-bad guessed XSA path.
                 LOG(f"Application \"{appName}\" references platform \"{pltName}\" "
                    f"which was not found among the discovered platforms; "
                    f"cannot check in a valid xsa correlation for it.")
                 self.bPlatformResolutionFailed = True
                 return SrcFilesWS.FAILURE
-            # Preserve the exact processor/domain this app was bound to
-            # (e.g. "psu_cortexa53_0" vs "psu_cortexr5_0" on a
-            # multi-processor xsa) alongside the xsa correlation, so
-            # checkout.py rebuilds it against the same domain instead of
-            # whichever processor its own HW metadata extraction happens
-            # to expose first (see checkout.py's getAppTargetProc). "os" is
-            # also recorded (even though only "standalone" ever reaches
-            # this point today, see the appOs check above) so checkout.py
-            # can independently refuse to silently rebuild an app as
-            # "standalone" if a comp-settings.json ever reaches it with a
-            # different recorded OS (e.g. checked in by an older/patched
-            # checkin.py, or a legacy check-in predating this guard),
-            # instead of relying solely on this check-in-time rejection.
+            # Preserve app-to-platform binding details for checkout.py.
             cpuInstance = dJsonData.get("cpuInstance", "")
             self.cfgWs.utilCfgWs.dPltAppCorr[appName] = {
                 "xsa": relPathPlt,
                 "cpu_instance": cpuInstance,
                 "os": appOs
                 }
-            # Resolve the canonical build file directly at
-            # <app-dir>/src/CMakeLists.txt instead of an app-wide recursive
-            # search: an extra module (a supported, separate top-level dir
-            # under the app, see checkout.py's _importAppExtraModules) can
-            # contain its own CMakeLists.txt, and filesystem traversal
-            # order is not guaranteed, so picking rglob's first result
-            # could silently select the wrong file instead of the app's own.
+            # Use the app's canonical top-level CMakeLists.txt.
             canonicalBuildFile = path.join(pItem, SrcFilesWS.APP_SRCCODE,
                                            SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX])
             if path.isfile(canonicalBuildFile):
                 lsDirApps.append(pItem)
                 self.sfWs.lsBldFl.append(canonicalBuildFile)
                 self.sfWs.lsTempSrcFl.append([])
-                # Collect source files from <app-dir>/src.
                 self.gatherAppSrcCd(pItem)
                 self.gatherAppOtherConf(pItem)
                 self.idxApp = self.idxApp + 1
@@ -975,47 +660,24 @@ class Workspace:
     def findApplications(self) -> list:
         """
         @Description
-        Applications have a vitis-comp.json file that is checked to
-        validate if it's platform or app. SrcFilesWS.lsConfCpy vector
-        on idx=1 has predefined this file. It appears in <platform-dirname>
-        too when an application is created by vitis.
-        
-        Path("<path>").rglob("<file-pattern>") searches in "<path>" all
-        occurences of "<file-patter>". It returns a generator that can be
-        casted to a vector/list obj. Therefore, indexing the wanted element,
-        such as CMakeLists.txt or *.json.
-        
-        Apps are counted with self.idxApp and passed to self.gatherAppOtherConf,
-        Some sort of correlation can be done to know which app has a certain
-        platform. With a JSONDecoder, file-buffer is read then passed to
-        <jsondecoder-obj>.decode func to get {[keys...] : [values...]} struct.
+        Discover supported applications in ws.
         """
         IDX_VCOMP = 0
         self.sfWs.lsBldFl = []
-        # No intermediate dirs, levelDepth ~ 1;
         chdir(self.sfWs.appDir)
-        # Store apps build files.
         lsDirApps = []
         pCwd = getcwd()
         for item in listdir(pCwd):
             if path.isdir(item) is False or item.startswith("."): continue
-            # Get build file ~ maybe check if it exists ?
-            # Check for vitis-comp.json or other files specific to an application.
             pItem = path.join(pCwd, item)
             cmpFile = list(Path(pItem).rglob(
                             SrcFilesWS.lsConfCpy[SrcFilesWS.COMP_FILE_IDX]))
             if len(cmpFile) == UtilityWS.EMPTY_BUFFER: continue
             strCmpFile = str(cmpFile[IDX_VCOMP])
-            # Extract type of component; this can be moved to UtilityWS.
-            # Extras: An app can have multiple templates though, but vitis-py-tools bugs
-            # prevent it from having them set, except <hello-world>.
             dJsonData = JSONDecoder().decode(open(strCmpFile).read())
-            # For now just one type of application is needed to not be saved.
             mtName = self.lsExcludedApps[0].search(dJsonData["name"])
             if mtName is not None: continue
-            # Pass parameters by ref with the same names.
             iRet = self.processGatherFiles(cmpFile, dJsonData, pItem, lsDirApps)
-        # Get back to 'sw submodule'.
         chdir(self.sfWs.pSubSw)
         LOG("Number of applications found: " + str(len(lsDirApps)))
         return lsDirApps
@@ -1023,23 +685,7 @@ class Workspace:
     def findPlatforms(self):
         """
         @Description
-        Working dir when this func is called must be sw submodule. Anyway,
-        sw structure had been verified long before calling findPlatforms.
-        Only components whose vitis-comp.json declares type "PLATFORM" are
-        considered (an application can legitimately carry its own xsa
-        asset). Iterate over its content to find *.xsa file(s): exactly one
-        is required, its path is stored in self.sfWs.lsArchFl,
-        <platform-dirname> into self.sfWs.lsArchPltDir respectively;
-        ambiguous (more than one) or missing xsa's are rejected/skipped
-        instead of guessing. self.sfWs.lsArchSrcDir gets the directory the
-        xsa should be checked in UNDER src: the original source folder name
-        recorded by checkout.py in SRC_DIR_MANIFEST when available (so a
-        rename/disambiguation of the workspace platform name, e.g. two
-        xsa's sharing a stem, does not make check-in create a brand-new
-        "src" directory and orphan the original one, which would leave a
-        stale checked-in xsa for the next checkout to rediscover as a bogus
-        duplicate platform), otherwise the workspace platform dirname
-        itself (first-time check-in of a new platform).
+        Discover platform components and their XSA files.
         """
         IDX_FRENC = 0
         IDX_VCOMP = 0
@@ -1049,65 +695,35 @@ class Workspace:
         for item in listdir(pCwd):
             if path.isdir(item) is False or item.startswith("."): continue
             pItem = path.join(pCwd, item)
-            # Only a vitis-comp.json-declared "PLATFORM" component is a
-            # platform: an application can legitimately carry its own xsa
-            # asset (e.g. a reference/test copy), and without this check
-            # it would be miscorrelated as a platform below.
+            # Ignore non-platform components that happen to carry an XSA.
             cmpFile = list(Path(pItem).rglob(
                             SrcFilesWS.lsConfCpy[SrcFilesWS.COMP_FILE_IDX]))
             if len(cmpFile) == UtilityWS.EMPTY_BUFFER: continue
             dJsonData = JSONDecoder().decode(open(str(cmpFile[IDX_VCOMP])).read())
             if dJsonData.get("type") != "PLATFORM": continue
-            # Get handoff ~ can be more;
             archFile = list(Path(pItem).rglob(SrcFilesWS.HOFF_HDL))
             if len(archFile) == UtilityWS.EMPTY_BUFFER:
-                # A validated "PLATFORM" component with no discoverable xsa
-                # cannot be checked in at all, bound to an app or not: an
-                # unbound platform never goes through processGatherFiles'
-                # own resolution failure path, so without this check-in
-                # would silently drop it and still report success. Record
-                # the failure and abort instead of skipping quietly.
+                # Missing XSA makes the platform unusable for check-in.
                 LOG(f"Platform \"{item}\" has no discoverable xsa file; "
                    f"cannot check it in.")
                 self.bPlatformResolutionFailed = True
                 continue
             elif len(archFile) > 1:
-                # A real platform can legitimately contain more than one
-                # xsa (e.g. the originally imported design alongside a
-                # regenerated export copy); picking an arbitrary one (rglob
-                # order is not guaranteed) risks copying/correlating the
-                # wrong handoff. Reject rather than guess. Same as the
-                # zero-xsa branch above, an unbound platform never reaches
-                # processGatherFiles' own resolution failure path, so mark
-                # discovery as failed here too instead of silently
-                # dropping the platform while check-in still succeeds.
+                # Reject ambiguous platforms instead of guessing an XSA.
                 LOG(f"Platform \"{item}\" contains {len(archFile)} xsa files; "
                    f"cannot unambiguously determine its authoritative "
                    f"handoff, skipping it.")
                 self.bPlatformResolutionFailed = True
                 continue
             else:
-                # Populate with xsa files path.
                 self.sfWs.lsArchFl.append(str(archFile[IDX_FRENC]))
-                # Preserve platforms dirs.
                 self.sfWs.lsArchPltDir.append(item)
-                # Original source folder, if checkout.py recorded one.
                 srcDirManifest = path.join(pItem, SrcFilesWS.SRC_DIR_MANIFEST)
                 srcDir = item
                 if path.isfile(srcDirManifest):
                     with open(srcDirManifest, "r") as f:
                         manifestDir = f.read().strip()
-                    # This manifest is later used, unvalidated, as a
-                    # destination dir under "src" (see collectCpyFiles,
-                    # which chdir's into "src" first and both mkdir's and
-                    # deletes stale xsa files inside destPltDir): a
-                    # corrupted/hand-edited manifest containing "..", an
-                    # absolute path, or any path separator could otherwise
-                    # make those operations escape "src" entirely. Accept
-                    # only a single safe directory name component and
-                    # silently keep the existing item/component-name
-                    # fallback (set above) for anything else, rather than
-                    # rejecting the whole platform over a bad manifest.
+                    # Accept only a safe single directory-name manifest.
                     isSafeSingleComponent = (
                         manifestDir != "" and
                         manifestDir not in (".", "..") and
@@ -1123,43 +739,19 @@ class Workspace:
                     elif isSafeSingleComponent:
                         srcDir = manifestDir
                 self.sfWs.lsArchSrcDir.append(srcDir)
-        # Get back to 'sw submodule'.
         chdir(self.sfWs.pSubSw)
         LOG("Number of platforms found: " + str(len(self.sfWs.lsArchPltDir)))
 
     def checkInSF(self) -> int:
         """
         @Description
-        Just one obj to Workspace class is needed to collect/prepare
-        source/config files that will be copied with collectCpyFiles func.
-
-        Ideal structure of sw submodule:
-        ++++++++++++++++++++++++++++++++++++++++++++
-        + sw                                       +
-        +  |- src                                  +
-        +      |- <checked-in-platforms-dirs>      +
-        +      |- <checked-in-applications-dirs>   +
-        +  |- scripts                              +
-        +      |- __pychace__                      +
-        +            |- <precompiled-py-files>     +
-        +      |- checkin.py                       +
-        +      |- checkout.py                      +
-        +      |- <other-files>                    +
-        +  |- ws                                   +
-        +      |- <platform-dirs>                  +
-        +           |- ... <specific-files>        +
-        +      |- <application-dirs>               +
-        +           |- ... <specific-files>        +
-        +  |- <other-files>                        +
-        ++++++++++++++++++++++++++++++++++++++++++++
+        Run the complete check-in flow.
         """
         if not UtilityWS.IS_DIRS:
             return UtilityWS.FAILURE
         try:
             if self.bPlatformResolutionFailed:
-                # An app's platform xsa could not be resolved during
-                # discovery (see processGatherFiles); do not copy/encode
-                # anything that would produce an unusable checked-in state.
+                # Avoid producing a known-unusable checked-in state.
                 LOG("Aborting check-in: one or more applications' platform "
                    "xsa could not be resolved.")
                 iRet = UtilityWS.FAILURE
@@ -1170,23 +762,14 @@ class Workspace:
                 else:
                     LOG("collectCpyFiles failed, skipping metadata encoding.")
                 if iRet == UtilityWS.SUCCESS and self.bIncompleteCheckIn:
-                    # At least one application was skipped (HLS component or
-                    # non-"standalone" OS, see processGatherFiles) and any
-                    # stale checked-in copy of it removed: everything else
-                    # was still checked in normally, but the overall backup
-                    # is incomplete, so a caller/CI must be able to detect
-                    # this instead of seeing a false success.
+                    # Report partial backups as failures.
                     LOG("Check-in finished with at least one application skipped "
                        "(see prior log messages); checked-in backup is incomplete.")
                     iRet = UtilityWS.FAILURE
         finally:
-            # Stop the locally started Vitis server on every exit path,
-            # including an exception raised above: a copy/JSON/Vitis error
-            # must not leave the server process and workspace lock dangling.
-            # Check if port or ip have been assigned manually.
+            # Stop only the server started by this process.
             if not UtilityWS.SET_IP_PORT:
                 UtilityWS.srvCl.stop()
-        # Clean up .wsdata after vitis-server shutdown if it exists.
         return iRet
 
 if __name__ == "__main__":
