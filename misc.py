@@ -6,13 +6,14 @@
     @Description Provide shared helpers for Vitis workspace automation.
 """
 import os
+import re
 import platform
 import subprocess
 import string
 import ctypes
 from ctypes import cdll
 from logging import (Logger, INFO, StreamHandler,
-                     Formatter)
+                     Formatter, LogRecord)
 from sys import (stdout, argv)
 from argparse import ArgumentParser
 
@@ -56,9 +57,23 @@ def MapCmdLineOpts(opt=OPT_CHECKIN, kwCLO={}):
             if attr is not None:
                 kwCLO[lsEntries[idx]] = attr
 
+# Optional file that mirrors every LOG message.
+_logFilePath = ""
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+def setLogFile(filePath : str = ""):
+    """
+    @Description Mirror all later LOG messages to a file; "" disables it.
+    @Parameters
+    filePath: Log file path (appended to).
+    """
+    global _logFilePath
+    _logFilePath = filePath
+
 def LOG(msg="",
         format="%(asctime)s %(levelname)s : %(message)s",
-        nameOtp=LOG_CHECKIN
+        nameOtp=LOG_CHECKIN,
+        detail=False
         ):
     """
     @Description Log a message for check-in or check-out output.
@@ -66,9 +81,22 @@ def LOG(msg="",
     msg: Message to display.
     format: Logging formatter string.
     nameOtp: Selects the logger label.
+    detail: Keep the message in the log file only (needs setLogFile).
     """
     name = "Info Checkin" if nameOtp == LOG_CHECKIN else "Info Checkout"
+    # Vitis exception text can embed ANSI color codes.
+    msg = _ANSI_RE.sub("", str(msg))
     
+    if _logFilePath:
+        try:
+            with open(_logFilePath, "a", encoding="utf-8") as logFile:
+                logFile.write(Formatter(format).format(
+                    LogRecord(name, INFO, "", 0, msg, None, None)) + "\n")
+            if detail:
+                return
+        except OSError:
+            pass
+
     class _LOG(Logger):
         """Emit a one-shot formatted log record."""
         def __init__(self, msg, fmt, name="", stream=stdout):
@@ -81,6 +109,15 @@ def LOG(msg="",
             self.addHandler(self.sHnd)
             self.log(level=INFO, msg=self.message)
     _locLog = _LOG(msg, format, name)
+
+def LOGD(msg="", **kwargs):
+    """
+    @Description Log a detail message: log file only once setLogFile is active.
+    @Parameters
+    msg: Message to log.
+    kwargs: Extra LOG arguments.
+    """
+    LOG(msg, detail=True, **kwargs)
 
 def CkFileOpenBlock(filename : str,
                     osName=""
