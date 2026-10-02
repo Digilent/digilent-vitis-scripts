@@ -26,8 +26,9 @@ import xsdb
 import threading
 import zipfile
 from xml.etree import ElementTree
-from misc import (LOG, stopDanglingVitisProcesses, listVitisProcesses,
+from misc import (LOG, LOGD, setLogFile, stopDanglingVitisProcesses, listVitisProcesses,
                   stopVitisProcessesByPid)
+from contextlib import (contextmanager, ExitStack)
 
 # Source extensions _pruneStaleFiles may prune at an app src top level.
 PRUNABLE_SRC_FILE_EXTENSIONS = frozenset({
@@ -59,7 +60,7 @@ def GetMetadata(**kwargs):
     
     if open_xsa == 1:
         if xsa != "":
-            LOG(f"Extracting hardware metadata from {xsa} using the HSI Python API...")
+            LOGD(f"Extracting hardware metadata from {xsa} using the HSI Python API...")
             #  xv_pycommontasks - py extension module (on win)
             #  xv_hsmpytasks - py extension module (on win)
             HwDesign = hsi.HwManager.open_hw_design(xsa)
@@ -82,23 +83,27 @@ def GetMetadata(**kwargs):
         else:
             LOG("No XSA file was provided, hardware metadata cannot be extracted!")
     else:
-        LOG("Skipping HW metadata extraction, not requested for this call.")
+        LOGD("Skipping HW metadata extraction, not requested for this call.")
     
     return ret_metadata
 
 class _BuildLogFilter:
     """
     @Description
-    Filter verbose Vitis build output.
+    Filter verbose Vitis build output. Everything goes to the log file;
+    only errors, failures and build results reach the terminal. Compiler
+    and CMake warnings are counted but kept in the log only.
     """
-    ESSENTIAL_PATTERN = compile(r"error|warning|fail|build finished|build complete|\*\*\*",
+    ESSENTIAL_PATTERN = compile(r"\berror\b|fail|build finished|build complete|\*\*\*",
                                 RegexFlag.IGNORECASE)
+    WARNING_PATTERN = compile(r"warning", RegexFlag.IGNORECASE)
 
     def __init__(self, logFile, realStream):
         """Store the wrapped log and terminal streams."""
         self._logFile = logFile
         self._real = realStream
         self._pending = ""
+        self.warningCount = 0
 
     def write(self, data):
         """Mirror data to the log and selected terminal lines."""
@@ -108,6 +113,8 @@ class _BuildLogFilter:
             line, self._pending = self._pending.split("\n", 1)
             if self.ESSENTIAL_PATTERN.search(line):
                 self._real.write(line + "\n")
+            elif self.WARNING_PATTERN.search(line):
+                self.warningCount += 1
 
     def flush(self):
         """Flush both wrapped streams."""
@@ -217,6 +224,8 @@ class Workspace:
     def __init__(self):
         """Initialize workspace state used across one checkout run."""
         self._buildLogPath = ""
+        # General (non-build) log kept next to the build log.
+        self._runLogPath = ""
         # Scratch area base for HSI side effects.
         self._wsPath = ""
         # Opt-in cleanup for pre-existing Vitis processes.
@@ -245,7 +254,7 @@ class Workspace:
                 domain.set_config(option=option, param=key, value=value)
                 # return Workspace.SUCCESS
             except:
-                LOG(f"domain.set_config raised for param \"{key}\" (known vitis-py "
+                LOGD(f"domain.set_config raised for param \"{key}\" (known vitis-py "
                    f"UserConfig bug, value may still have been applied)")
                 # Cannot set all params...
                 # return Workspace.FAILURE
@@ -269,7 +278,7 @@ class Workspace:
                 app.set_app_config(key=key, value=value)
                 # return Workspace.SUCCESS
             except:
-                LOG(f"app.set_app_config raised for param \"{key}\" (known vitis-py "
+                LOGD(f"app.set_app_config raised for param \"{key}\" (known vitis-py "
                    f"UserConfig bug, value may still have been applied)")
                 # Cannot set all params...
                 # return Workspace.FAILURE
@@ -375,6 +384,25 @@ class Workspace:
                 return value["os"]
         return "standalone"
 
+    @contextmanager
+    def _quietOutput(self):
+        """
+        @Description
+        Send general Vitis/HSI console output to checkout.log and keep only
+        essential lines (errors, failures, build results) on the terminal.
+        LOG() status messages are unaffected and also mirrored to the log.
+        """
+        if not self._runLogPath:
+            yield
+            return
+        realStdout = sys.stdout
+        with open(self._runLogPath, "a", encoding="utf-8") as logFile:
+            sys.stdout = _BuildLogFilter(logFile, realStdout)
+            try:
+                yield
+            finally:
+                sys.stdout = realStdout
+
     def quietBuild(self, buildFn, desc="") -> None:
         """
         @Description
@@ -388,14 +416,20 @@ class Workspace:
             if not self._buildLogPath:
                 status = buildFn()
             else:
-                LOG(f"Building {desc}, full Vitis build log kept at: {self._buildLogPath}")
+                LOGD(f"Building {desc}, full Vitis build log kept at: {self._buildLogPath}")
                 realStdout = sys.stdout
+                warnings = 0
                 with open(self._buildLogPath, "a", encoding="utf-8") as logFile:
-                    sys.stdout = _BuildLogFilter(logFile, realStdout)
+                    buildFilter = _BuildLogFilter(logFile, realStdout)
+                    sys.stdout = buildFilter
                     try:
                         status = buildFn()
                     finally:
                         sys.stdout = realStdout
+                        warnings = buildFilter.warningCount
+                if warnings:
+                    LOG(f"Built {desc}: {warnings} warning line(s) not shown "
+                        f"(see {self._buildLogPath}).")
 
         if status is not None and status is not True and status != 0:
             raise Exception(f"Build failed for {desc} (status: {status}), see {self._buildLogPath}")
@@ -476,7 +510,7 @@ class Workspace:
             if needs_leading_blank:
                 f.write("\n")
             f.write("\n".join(lines) + "\n")
-        LOG(f"Added workspace ignore rules to {gitignore_path}")
+        LOGD(f"Added workspace ignore rules to {gitignore_path}")
 
     def _confirmWorkspaceWipe(self, ws_path) -> None:
         """
@@ -531,7 +565,7 @@ class Workspace:
             for attempt in range(1, max_try + 1):
                 try:
                     self._clearWorkspaceContents(ws_path)
-                    LOG(f"Cleared workspace {ws_path} on attempt {attempt}.")
+                    LOGD(f"Cleared workspace {ws_path} on attempt {attempt}.")
                     break
                 except Exception as e:
                     LOG(f"Attempt {attempt} to clear the old workspace failed: {e}")
@@ -556,6 +590,8 @@ class Workspace:
         self._ensureParentGitignore(ws_path)
         self._wsPath = ws_path
         self._buildLogPath = path.join(ws_path, "checkout_build.log")
+        self._runLogPath = path.join(ws_path, "checkout.log")
+        setLogFile(self._runLogPath)
         LOG(f"Successfully created Vitis client on workspace {client.get_workspace()}")
 
     @staticmethod
@@ -606,7 +642,7 @@ class Workspace:
                         if path.isfile(lock_path):
                             try:
                                 remove(lock_path)
-                                LOG(f"Removed stale workspace lock file: {lock_path}")
+                                LOGD(f"Removed stale workspace lock file: {lock_path}")
                             except OSError as lock_err:
                                 LOG(f"Failed to remove stale lock file {lock_path}: {lock_err}")
                     else:
@@ -634,6 +670,8 @@ class Workspace:
         self._setWorkspaceWithRetry(client, ws_path)
         self._wsPath = ws_path
         self._buildLogPath = path.join(ws_path, "checkout_build.log")
+        self._runLogPath = path.join(ws_path, "checkout.log")
+        setLogFile(self._runLogPath)
         LOG(f"Reusing existing Vitis workspace {client.get_workspace()} (selective rebuild).")
 
     def _hashFileContents(self, filepath) -> str:
@@ -777,7 +815,7 @@ class Workspace:
                 continue
             if path.isdir(path.join(entry_path, "src")):
                 app_names.append(entry)
-                LOG(f"Detected application: {entry}")
+                LOGD(f"Detected application: {entry}")
             for filename in listdir(entry_path):
                 filepath = path.join(entry_path, filename)
                 if path.isfile(filepath) and filename.endswith(".xsa"):
@@ -854,11 +892,11 @@ class Workspace:
             plt["arch"] = metadata["arch"]
             plt["target_proc"] = metadata["target_proc"]
             plt["target_procs"] = metadata["target_procs"]
-            LOG(f"Platform \"{plt['name']}\": detected arch \"{plt['arch']}\", "
+            LOGD(f"Platform \"{plt['name']}\": detected arch \"{plt['arch']}\", "
                f"available target processor(s): {plt['target_procs']}")
 
         execution_time = time.time() - start_time
-        LOG(f"Hardware metadata extraction took {execution_time:.4f} seconds")
+        LOGD(f"Hardware metadata extraction took {execution_time:.4f} seconds")
 
     def _findDomainCmakeCache(self, platform_dir, domain_name):
         """
@@ -941,7 +979,7 @@ class Workspace:
                 )
             if n:
                 changed = True
-                LOG(f"Fixed CMAKE_{lang}_FLAGS for {label}: {fixed_value}")
+                LOGD(f"Fixed CMAKE_{lang}_FLAGS for {label}: {fixed_value}")
 
         if changed:
             with open(cache_path, "w", encoding="utf-8") as f:
@@ -957,7 +995,7 @@ class Workspace:
         domain: domain object.
         domain_name: domain name for logging.
         """
-        LOG(f"Configuring BSP settings for the domain \"{domain_name}\"...")
+        LOGD(f"Configuring BSP settings for the domain \"{domain_name}\"...")
         self.setConfigDomain(
             domain,
             "proc",
@@ -1007,7 +1045,7 @@ class Workspace:
             LOG(f"No --esw-repo provided: FSBL build for platform \"{name}\" will "
                "use Vitis's own bundled embeddedsw repo.")
         fsbl_domain_name = f"{target_proc}_domain_fsbl"
-        LOG(f"Adding domain \"{fsbl_domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
+        LOGD(f"Adding domain \"{fsbl_domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
         zynqmp_fsbl_domain = platform.add_domain(
             cpu=target_proc,
             os="standalone",
@@ -1112,7 +1150,7 @@ class Workspace:
             proc_is_microblaze = target_proc.startswith("microblaze")
             domain_name = f"domain_{target_proc}"
 
-            LOG(f"Adding domain \"{domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
+            LOGD(f"Adding domain \"{domain_name}\" for cpu \"{target_proc}\" and OS \"standalone\"...")
             domain = platform.add_domain(
                 cpu=target_proc,
                 os="standalone",
@@ -1198,7 +1236,7 @@ class Workspace:
                     shutil.rmtree(dest_entry, onerror=self._forceRemoveReadonly)
                 else:
                     remove(dest_entry)
-                LOG(f"Removed stale file no longer present in the checked-in source: {dest_entry}")
+                LOGD(f"Removed stale file no longer present in the checked-in source: {dest_entry}")
             elif is_dir:
                 self._pruneStaleFiles(dest_entry, src_entry)
 
@@ -1441,7 +1479,7 @@ class Workspace:
             from_loc=repo_root + sep + "src" + sep + app.component_name + sep + "src",
             dest_dir_in_cmp="src"
         )
-        LOG(f"Application component \"{app_name}\" created at: {app.component_location}")
+        LOGD(f"Application component \"{app_name}\" created at: {app.component_location}")
         self._importAppExtraModules(app, app_name, repo_root)
         self._removeTemplateCruft(app)
         self._buildAppWithFlagsRetry(app, app_name)
@@ -1463,7 +1501,7 @@ class Workspace:
             entry_path = app_root + sep + entry
             if entry == "src" or not path.isdir(entry_path):
                 continue
-            LOG(f"Importing extra module \"{entry}\" for application \"{app_name}\"...")
+            LOGD(f"Importing extra module \"{entry}\" for application \"{app_name}\"...")
             app.import_files(from_loc=entry_path, dest_dir_in_cmp=path.join("src", entry))
             imported_modules.add(entry)
         self._writeExtraModulesManifest(app, imported_modules)
@@ -1496,7 +1534,7 @@ class Workspace:
             )
         with open(cmakelists_path, "w") as f:
             f.write(content)
-        LOG(f"Wired USER_COMPILE_SOURCES into the build for application "
+        LOGD(f"Wired USER_COMPILE_SOURCES into the build for application "
            f"\"{app_name}\" (Vitis 2025.2 CMakeLists.txt does not consume "
            f"it on its own)...")
 
@@ -1535,13 +1573,13 @@ class Workspace:
         for dirpath, dirnames, filenames in walk(app.component_location + sep + "src"):
             for filename in filenames:
                 if (filename in ("Xilinx.spec", "README.txt")):
-                    LOG(f"Removing template file \"{filename}\" from {path.join(dirpath, filename)}")
+                    LOGD(f"Removing template file \"{filename}\" from {path.join(dirpath, filename)}")
                     app.remove_files(files=[path.join(dirpath, filename)])
 
         for dirpath, dirnames, filenames in walk(app.component_location + sep + "_ide"+ sep + "psinit"):
             for filename in filenames:
                 if (filename not in ("psu_init.tcl", "ps7_init.tcl")):
-                    LOG(f"Removing template file \"{filename}\" from {path.join(dirpath, filename)}")
+                    LOGD(f"Removing template file \"{filename}\" from {path.join(dirpath, filename)}")
                     app.remove_files(files=[path.join(dirpath, filename)])
 
     def checkOutSF(self, platforms=None, apps=None, skip_unbound_platforms=False,
@@ -1573,13 +1611,17 @@ class Workspace:
         dispose()
 
         LOG("Checking out Vitis project into the workspace...")
+        LOG("Console shows essential messages only. Full details: "
+            f"{path.join(ws_path, 'checkout.log')} (all steps) and "
+            f"{path.join(ws_path, 'checkout_build.log')} (Vitis builds, incl. warnings).")
+        outputStack = ExitStack()
         try:
             client = create_client()
             if selective:
                 self._openExistingWorkspace(client, ws_path)
             else:
                 self._prepareWorkspace(client, ws_path)
-
+            outputStack.enter_context(self._quietOutput())
             app_names, hw_platforms = self._discoverAppsAndPlatforms(repo_root + f"{sep}src")
             self._extractPlatformMetadata(hw_platforms)
 
@@ -1657,7 +1699,7 @@ class Workspace:
                 else:
                     for stale_name in (plt["name"], f"{plt['name']}_FSBL"):
                         if stale_name in existing:
-                            LOG(f"Deleting existing component \"{stale_name}\" for rebuild...")
+                            LOGD(f"Deleting existing component \"{stale_name}\" for rebuild...")
                             client.delete_component(name=stale_name)
                     client = self._buildPlatform(client, xsa_path, plt, repo_path)
 
@@ -1676,7 +1718,7 @@ class Workspace:
                     self._rebuildApplicationInPlace(client, app_name, repo_root)
                 else:
                     if app_name in existing:
-                        LOG(f"Deleting existing application component \"{app_name}\" for rebuild...")
+                        LOGD(f"Deleting existing application component \"{app_name}\" for rebuild...")
                         client.delete_component(name=app_name)
                     if not self._buildApplication(client, app_name, hw_platforms, repo_root):
                         all_apps_resolved = False
@@ -1688,6 +1730,7 @@ class Workspace:
 
             return Workspace.SUCCESS
         finally:
+            outputStack.close()
             dispose()
 
     def _getBoundPlatformNames(self, app_names, hw_platforms, repo_root) -> set:
@@ -1793,4 +1836,6 @@ if __name__ == "__main__":
         esw_repo=args.esw_repo
         )
     LOG("Checkout finished with status: " + str(iRet))
+    if lcWs._runLogPath:
+        LOG(f"Full details: {lcWs._runLogPath} and {lcWs._buildLogPath}")
     sys.exit(iRet)
