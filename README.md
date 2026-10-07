@@ -178,9 +178,11 @@ for development of `projects`.
 ## Command Reference (copy/paste, replace placeholders as needed)
 
 **Note:**
-*Replace `<version>` with the installed Vitis version (e.g. `2025.2`) and `<install-path>`*
-*with an install root to search first. `-s` is resolved relative to the launcher's own*
-*directory, so pass a bare `checkout.py`/`checkin.py`, never prefixed with `scripts\`.*
+*Replace `<version>` with the installed Vitis version (e.g. `2025.2`), `<install-path>`*
+*with an install root to search first, and `<path-to-scripts-repo>` with the absolute or*
+*relative path to this repository (the scripts submodule). The launchers can be run from any*
+*directory. `-s` is resolved relative to the launcher's own directory, so pass a bare*
+*`checkout.py`/`checkin.py`, never prefixed with `<path-to-scripts-repo>`.*
 
 **`checkout.py` flags** (combinable):
 
@@ -197,64 +199,64 @@ for development of `projects`.
 * `--port <port-number>`: Vitis server port; auto-selected if omitted.
 * `--ip <ip-address>`: Vitis server host; defaults to localhost.
 
-**Windows (`_vitis.bat`)**, run from the repository root:
+**Windows (`_vitis.bat`)**:
 
 ```bat
 :: full wipe + rebuild of every platform/app
-.\scripts\_vitis.bat -v <version> -s checkout.py
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkout.py
 
 :: rebuild only this platform (+ any app bound to it)
-.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name>
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkout.py --platform <platform-name>
 
 :: rebuild only this app (+ its resolved platform)
-.\scripts\_vitis.bat -v <version> -s checkout.py --app <app-name>
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkout.py --app <app-name>
 
 :: rebuild only this explicit platform+app pair
-.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --app <app-name>
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --app <app-name>
 
 :: rebuild this app in place (re-sync + incremental cmake build, no delete/recreate)
-.\scripts\_vitis.bat -v <version> -s checkout.py --app <app-name> --incremental
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkout.py --app <app-name> --incremental
 
 :: full run, but skip platforms not referenced by any app's comp-settings.json
-.\scripts\_vitis.bat -v <version> -s checkout.py --skip-unbound-platforms
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkout.py --skip-unbound-platforms
 
 :: rebuild only this platform, still skipping other unbound platforms
-.\scripts\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --skip-unbound-platforms
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkout.py --platform <platform-name> --skip-unbound-platforms
 
 :: back up the current workspace's sources into src\
-.\scripts\_vitis.bat -v <version> -s checkin.py
+<path-to-scripts-repo>\_vitis.bat -v <version> -s checkin.py
 
 :: only stop leftover Vitis-install-scoped processes (no script run)
-.\scripts\_vitis.bat -v <version> --stop-dangling
+<path-to-scripts-repo>\_vitis.bat -v <version> --stop-dangling
 
 :: search a specific install root first, then run checkout.py
-.\scripts\_vitis.bat -v <version> -i <install-path> -s checkout.py
+<path-to-scripts-repo>\_vitis.bat -v <version> -i <install-path> -s checkout.py
 ```
 
-**Windows (`_vitis.ps1`)**, run from the repository root:
+**Windows (`_vitis.ps1`)**:
 
 ```powershell
 # full wipe + rebuild of every platform/app
-.\scripts\_vitis.ps1 -v <version> -s checkout.py
+<path-to-scripts-repo>\_vitis.ps1 -v <version> -s checkout.py
 
 # rebuild only this platform in place (incremental)
-.\scripts\_vitis.ps1 -v <version> -s checkout.py --platform <platform-name> --incremental
+<path-to-scripts-repo>\_vitis.ps1 -v <version> -s checkout.py --platform <platform-name> --incremental
 
 # only stop leftover Vitis-install-scoped processes (no script run)
-.\scripts\_vitis.ps1 -v <version> -StopDangling
+<path-to-scripts-repo>\_vitis.ps1 -v <version> -StopDangling
 ```
 
-**Linux (`_vitis.sh`)**, run from the repository root:
+**Linux (`_vitis.sh`)**:
 
 ```bash
 # full wipe + rebuild of every platform/app
-./scripts/_vitis.sh -v <version> -s checkout.py
+<path-to-scripts-repo>/_vitis.sh -v <version> -s checkout.py
 
 # rebuild only this app in place (incremental)
-./scripts/_vitis.sh -v <version> -s checkout.py --app <app-name> --incremental
+<path-to-scripts-repo>/_vitis.sh -v <version> -s checkout.py --app <app-name> --incremental
 
 # only stop leftover Vitis-install-scoped processes (no script run)
-./scripts/_vitis.sh -v <version> --stop-dangling
+<path-to-scripts-repo>/_vitis.sh -v <version> --stop-dangling
 ```
 
 ----
