@@ -1082,6 +1082,9 @@ class Workspace:
     def _buildPlatform(self, client, xsa_path, plt, repo_path):
         """Build one platform and return the client to keep using."""
         watchdog = _BuildWatchdog(f"platform \"{plt['name']}\"", self._wsPath, auto_recover=True)
+        LOG(f"Building platform \"{plt['name']}\": the Vitis gRPC server may block here; if there "
+           f"is no output and no workspace activity for ~{_BuildWatchdog.WARN_INTERVAL_SEC // 60} "
+           "minute(s), Vitis will be reset automatically and the platform retried once.")
         try:
             with watchdog:
                 self._buildPlatformImpl(client, xsa_path, plt, repo_path)
@@ -1092,7 +1095,7 @@ class Workspace:
             LOG(f"Platform \"{plt['name']}\" build failed ({e}) after this run's "
                "own Vitis backend was force-stopped for a detected genuine "
                "hang; starting a fresh Vitis session and retrying this "
-               "platform once...")
+               "platform once (AUTOMATIC RESET, no action needed)...")
 
         # Recovery left a stale lock behind; clear it before retrying.
         lock_path = path.join(self._wsPath, "_ide", ".wsdata", ".lock")
