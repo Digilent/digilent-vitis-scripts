@@ -18,13 +18,15 @@ import argparse
 import glob
 import json
 import re
+import socket
+import subprocess
 import sys
 import tkinter
 from os import path, stat, environ, pathsep, _exit
-from time import sleep
+from time import sleep, time
 
 import xsdb
-from misc import LOG, setLogFile
+from misc import LOG, LOGD, setLogFile
 
 # Per family settings: the IDE uses the same values in its launch scripts
 FAMILIES = {
@@ -522,6 +524,72 @@ def build_app(ws, app):
         dispose()
 
 
+class LogOut:
+    """@Description stdout replacement that sends the xsdb prints to the log file only."""
+
+    def __init__(self):
+        """@Description Start with an empty line buffer."""
+        self.buf = ""
+
+    def write(self, text):
+        """
+        @Description Log every completed line.
+        @Parameters
+        text: Text printed by xsdb.
+        """
+        self.buf += text
+        *lines, self.buf = self.buf.split("\n")
+        for line in lines:
+            if line.strip():
+                LOGD(line.rstrip())
+        return len(text)
+
+    def flush(self):
+        """@Description Log the pending partial line."""
+        if self.buf.strip():
+            LOGD(self.buf.rstrip())
+        self.buf = ""
+
+
+def start_server(host, port, logfile):
+    """
+    @Description Start hw_server when none listens; xsdb would relaunch it with a short idle timeout.
+    @Parameters
+    host: hw_server host; only local hosts are started.
+    port: hw_server port.
+    logfile: File that receives the hw_server output.
+    @Returns The started process, or None when one was already listening or cannot be started.
+    """
+    def listening():
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except OSError:
+            return False
+
+    launcher = path.join(environ.get("XILINX_VITIS", ""), "bin", "hw_server.bat")
+    if listening() or host not in ("127.0.0.1", "localhost") or not path.isfile(launcher):
+        return None
+    LOG(f"Starting hw_server on port {port}")
+    proc = subprocess.Popen([launcher, "-s", f"tcp::{port}", "-L", logfile], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+    end = time() + 30
+    while time() < end and not listening():
+        sleep(0.5)
+    return proc
+
+
+def stop_server(proc):
+    """
+    @Description Stop the hw_server started by this script, with its launcher children.
+    @Parameters
+    proc: Process returned by start_server, or None.
+    """
+    if proc:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def main():
     """@Description Parse the options and run the programming flow."""
     scripts = path.dirname(path.abspath(__file__))
@@ -570,9 +638,16 @@ def main():
         environ["PATH"] = vitis_bin + pathsep + environ.get("PATH", "")
 
     ws = path.abspath(args.ws)
+    logfile = ""
     if not args.dry_run and path.isdir(ws):
-        setLogFile(args.log or path.join(ws, "program.log"))
+        logfile = args.log or path.join(ws, "program.log")
+        setLogFile(logfile)
+        if not args.list_targets:
+            sys.stdout = LogOut()
+    server = None
     try:
+        if logfile:
+            server = start_server(args.host, args.port, path.join(path.dirname(logfile), "hw_server.log"))
         plan = load_plan(ws, args)
         if args.build and not args.dry_run:
             build_app(ws, plan["app"])
@@ -592,6 +667,12 @@ def main():
     except Exception as err:
         LOG(f"ERROR: {err}")
         return 1
+    finally:
+        stop_server(server)
+        if isinstance(sys.stdout, LogOut):
+            sys.stdout.flush()
+            sys.stdout = sys.__stdout__
+            LOG(f"Details in {logfile}")
     return 0
 
 
