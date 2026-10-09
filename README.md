@@ -247,7 +247,8 @@ Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` fi
 * Overrides: `--family {zynq,zynqmp}`, `--elf`, `--core`, `--bit`, `--xsa`, `--init-tcl`,
   `--fsbl-elf`, `--fsbl-exit`.
 * Connection: `--cable <name-substring>`, `--host`, `--port`, `--timeout <s>` (FSBL run).
-* Extras: `--build` (rebuild the app first), `--watch` (reprogram the ELF when it changes),
+* Extras: `--build` (rebuild the app in `ws` first; it does not sync `src` like `checkout.py`),
+  `--watch` (reprogram the ELF when it changes),
   `--list-targets`, `--dry-run`, `--log <file>`.
 
 **Windows (`_vitis.bat`)**:
