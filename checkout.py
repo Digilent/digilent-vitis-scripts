@@ -232,6 +232,8 @@ class Workspace:
         self._allowProcessCleanup = False
         # Skip the wipe confirmation prompt on full checkout.
         self._skipConfirmation = False
+        # Launch configs initialize the PS with psu_init.tcl instead of the FSBL.
+        self._psuInitLaunch = False
         # XSA paths skipped for a confirmed Vitis-version mismatch.
         self._versionSkippedXsaPaths = set()
 
@@ -492,8 +494,7 @@ class Workspace:
         gitignore_path = path.join(repo_root, ".gitignore")
         ws_name = path.basename(ws_path)
         ignore_rule = f"/{ws_name}/*"
-        required_lines = [ignore_rule] + [f"!/{ws_name}/{entry}"
-                                          for entry in sorted(self.PRESERVED_WS_ENTRIES)]
+        required_lines = [ignore_rule, f"!/{ws_name}/.keep"]
         existing_lines = set()
         if path.isfile(gitignore_path):
             with open(gitignore_path, "r", encoding="utf-8") as f:
@@ -1490,7 +1491,37 @@ class Workspace:
         self._importAppExtraModules(app, app_name, repo_root)
         self._removeTemplateCruft(app)
         self._buildAppWithFlagsRetry(app, app_name)
+        self._applyLaunchInit(app, app_name, comp_settings_path)
         return True
+
+    def _applyLaunchInit(self, app, app_name, comp_settings_path) -> None:
+        """
+        @Description
+        Switch the app launch config from FSBL to psu_init.tcl when requested
+        by --psu-init or by "psu_init": true in the app's comp-settings.json.
+
+        @Parameters
+        app: built application component.
+        app_name: application folder name, used for logging.
+        comp_settings_path: absolute comp-settings.json path.
+        """
+        enabled = self._psuInitLaunch
+        if not enabled and path.isfile(comp_settings_path):
+            with open(comp_settings_path) as f:
+                for key, value in JSONDecoder().decode(f.read()).items():
+                    if (not key.startswith("USER_") and isinstance(value, dict)
+                            and value.get("psu_init") is True):
+                        enabled = True
+        launch_path = path.join(app.component_location, "_ide", "launch.json")
+        if not enabled or not path.isfile(launch_path):
+            return
+        with open(launch_path, "r") as f:
+            content = f.read()
+        patched = (content.replace('"isFsbl": true', '"isFsbl": false')
+                          .replace('"initWithFSBL": true', '"initWithFSBL": false'))
+        with open(launch_path, "w") as f:
+            f.write(patched)
+        LOG(f"Launch config of \"{app_name}\" initializes the PS with psu_init.tcl.")
 
     def _importAppExtraModules(self, app, app_name, repo_root) -> None:
         """
@@ -1591,11 +1622,12 @@ class Workspace:
 
     def checkOutSF(self, platforms=None, apps=None, skip_unbound_platforms=False,
                    incremental=False, allow_process_cleanup=False, assume_yes=False,
-                   esw_repo=None) -> int:
+                   esw_repo=None, psu_init=False) -> int:
         """Recreate or selectively rebuild the Vitis workspace."""
         platforms = set(platforms or [])
         apps = set(apps or [])
         selective = bool(platforms or apps)
+        self._psuInitLaunch = psu_init
         self._allowProcessCleanup = allow_process_cleanup
         self._skipConfirmation = assume_yes
 
@@ -1830,6 +1862,10 @@ if __name__ == "__main__":
         "--esw-repo", default=None, metavar="PATH",
         help="Use this embeddedsw checkout for ZynqMP FSBL work."
         )
+    parser.add_argument(
+        "--psu-init", action="store_true",
+        help="Launch configs initialize the PS with psu_init.tcl instead of the FSBL."
+        )
     args = parser.parse_args()
 
     lcWs = Workspace()
@@ -1840,7 +1876,8 @@ if __name__ == "__main__":
         incremental=args.incremental,
         allow_process_cleanup=args.allow_process_cleanup,
         assume_yes=args.assume_yes,
-        esw_repo=args.esw_repo
+        esw_repo=args.esw_repo,
+        psu_init=args.psu_init
         )
     LOG("Checkout finished with status: " + str(iRet))
     if lcWs._runLogPath:
