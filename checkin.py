@@ -646,6 +646,12 @@ class Workspace:
                 "cpu_instance": cpuInstance,
                 "os": appOs
                 }
+            # Keep the psu_init launch choice, see checkout.py.
+            launchPath = path.join(pItem, "_ide", "launch.json")
+            if path.isfile(launchPath):
+                with open(launchPath, "r", encoding="utf-8") as fd:
+                    if '"isFsbl": false' in fd.read():
+                        self.cfgWs.utilCfgWs.dPltAppCorr[appName]["psu_init"] = True
             # Use the app's canonical top-level CMakeLists.txt.
             canonicalBuildFile = path.join(pItem, SrcFilesWS.APP_SRCCODE,
                                            SrcFilesWS.lsConfCpy[SrcFilesWS.BUILD_FILE_IDX])
