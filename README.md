@@ -203,11 +203,11 @@ Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` fi
 
 4. Examples (run from any directory):
 
-   `.\scripts\_vitis.ps1 -v 2025.2 -s checkout.py`
+   `<path-to-scripts-repo>\_vitis.ps1 -v <version> -s checkout.py`
 
-   `scripts\_vitis.bat -v 2025.2 -s checkin.py`
+   `<path-to-scripts-repo>\_vitis.bat -v <version> -s checkin.py`
 
-   `./scripts/_vitis.sh -v 2025.2 -s checkout.py`
+   `<path-to-scripts-repo>/_vitis.sh -v <version> -s checkout.py`
 
 5. The same logic, plus process management and platform XSA update/upgrade helpers, is
    available from Python in `misc.py`.
