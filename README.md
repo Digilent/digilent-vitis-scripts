@@ -130,6 +130,45 @@ for development of `projects`.
 
 ----
 
+## Quick Programming Guide
+
+`program.py` programs the board from an app's Vitis launch configuration, without opening the
+Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` first.
+
+**Note:**
+*Supports Zynq-7000 and Zynq UltraScale+ (the family is taken from the launch configuration).*
+*Only the ZynqMP flow is validated on hardware. Versal is not supported. There is no UART*
+*option; use a terminal program such as PuTTY.*
+
+1. Connect and power the board, and close any tool holding the JTAG cable.
+
+2. Run the script through a launcher. By default it resets the system, programs the
+   bitstream, initializes the PS (`psu_init`/`ps7_init`, or the FSBL, as set in the launch
+   configuration), downloads the app ELF and runs it:
+
+   `<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py`
+
+3. Typical variations:
+
+   `<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py --elf-only` (reuse the current PS/PL state)
+
+   `<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py --app <app-name>` (when `ws` has several apps)
+
+   `<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py --dry-run` (print the steps only)
+
+4. Output:
+
+   * The terminal shows the programming steps and errors.
+   * `ws\program.log` (appended) also holds the xsdb output, e.g. the downloaded sections.
+   * `ws\hw_server.log` holds the `hw_server` log. The script starts `hw_server` when none
+     listens on the port, and stops it when it exits.
+
+**Note:**
+*The app is picked automatically from the only `ws\<app>\_ide\launch.json` (platform FSBL*
+*apps are ignored). With two or more apps, `--app` is required.*
+
+----
+
 ## Running Scripts Without Vitis Environment Variables
 
 **Note:**
@@ -182,7 +221,7 @@ for development of `projects`.
 *with an install root to search first, and `<path-to-scripts-repo>` with the absolute or*
 *relative path to this repository (the scripts submodule). The launchers can be run from any*
 *directory. `-s` is resolved relative to the launcher's own directory, so pass a bare*
-*`checkout.py`/`checkin.py`, never prefixed with `<path-to-scripts-repo>`.*
+*`checkout.py`/`checkin.py`/`program.py`, never prefixed with `<path-to-scripts-repo>`.*
 
 **`checkout.py` flags** (combinable):
 
@@ -198,6 +237,18 @@ for development of `projects`.
 
 * `--port <port-number>`: Vitis server port; auto-selected if omitted.
 * `--ip <ip-address>`: Vitis server host; defaults to localhost.
+
+**`program.py` flags** (combinable):
+
+* Selection: `--ws <path>`, `--app <app-name>`, `--config <name>` (launch configuration).
+* Steps: `--elf-only`, `--no-reset`, `--no-bitstream`, `--no-init`, `--no-run`,
+  `--stop-at-entry`.
+* PS init mode: `--psu-init` (alias `--ps7-init`, `--ps-init`) or `--fsbl`; default from `launch.json`.
+* Overrides: `--family {zynq,zynqmp}`, `--elf`, `--core`, `--bit`, `--xsa`, `--init-tcl`,
+  `--fsbl-elf`, `--fsbl-exit`.
+* Connection: `--cable <name-substring>`, `--host`, `--port`, `--timeout <s>` (FSBL run).
+* Extras: `--build` (rebuild the app first), `--watch` (reprogram the ELF when it changes),
+  `--list-targets`, `--dry-run`, `--log <file>`.
 
 **Windows (`_vitis.bat`)**:
 
@@ -225,6 +276,12 @@ for development of `projects`.
 
 :: back up the current workspace's sources into src\
 <path-to-scripts-repo>\_vitis.bat -v <version> -s checkin.py
+
+:: program the board from the app's launch configuration
+<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py
+
+:: only download and run the ELF, selecting the app
+<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py --app <app-name> --elf-only
 
 :: only stop leftover Vitis-install-scoped processes (no script run)
 <path-to-scripts-repo>\_vitis.bat -v <version> --stop-dangling
