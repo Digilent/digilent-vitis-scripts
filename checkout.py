@@ -152,14 +152,19 @@ class _BuildWatchdog:
     def _mostRecentMtime(ws_path):
         """
         @Description
-        Return the newest file mtime under a workspace tree.
+        Return the newest file mtime under a workspace tree, ignoring the run
+        log the watchdog itself writes to.
         """
         latest = None
+        runLog = path.normcase(path.join(ws_path, "checkout.log"))
         try:
             for root, _dirs, files in walk(ws_path):
                 for f in files:
+                    fullPath = path.join(root, f)
+                    if path.normcase(fullPath) == runLog:
+                        continue
                     try:
-                        mtime = path.getmtime(path.join(root, f))
+                        mtime = path.getmtime(fullPath)
                     except OSError:
                         continue
                     if latest is None or mtime > latest:
