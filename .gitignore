@@ -1,0 +1,7 @@
+# ignore cache folder created by Python
+
+/__pycache__/*
+
+# ignore Vitis/HSI runtime scratch artifacts left behind by a local test run
+/.Xil/
+dfx_runtime.txt
