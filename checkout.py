@@ -1076,7 +1076,11 @@ class Workspace:
 
         self.quietBuild(fsbl_app.build, f"FSBL application \"{fsbl_app_name}\"")
         platform.remove_boot_bsp()
-        platform.set_fsbl_elf(path=fsbl_app.component_location + sep + "build" + sep + f"{fsbl_app_name}.elf")
+        # Vitis launch configurations expect the platform boot elf to be named fsbl.elf
+        fsbl_build_dir = fsbl_app.component_location + sep + "build"
+        fsbl_default_elf = fsbl_build_dir + sep + "fsbl.elf"
+        shutil.copy2(fsbl_build_dir + sep + f"{fsbl_app_name}.elf", fsbl_default_elf)
+        platform.set_fsbl_elf(path=fsbl_default_elf)
         self.quietBuild(platform.build, f"platform \"{name}\" (with fsbl elf)")
 
     def _buildPlatform(self, client, xsa_path, plt, repo_path):
