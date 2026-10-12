@@ -15,6 +15,7 @@ from pathlib import Path
 from shutil import copy, rmtree
 from json import (JSONEncoder, JSONDecoder)
 from re import (compile, escape, RegexFlag)
+from hashlib import sha256
 from sys import exit as sys_exit
 from misc import (LOG, MapCmdLineOpts)
 
@@ -708,6 +709,12 @@ class Workspace:
             dJsonData = JSONDecoder().decode(open(str(cmpFile[IDX_VCOMP])).read())
             if dJsonData.get("type") != "PLATFORM": continue
             archFile = list(Path(pItem).rglob(SrcFilesWS.HOFF_HDL))
+            # Skip Vitis temp copies (.Xil) and export copies with identical content.
+            archFile = [f for f in archFile if ".Xil" not in f.parts]
+            uniqByHash = {}
+            for f in sorted(archFile, key=lambda p: len(p.parts)):
+                uniqByHash.setdefault(sha256(f.read_bytes()).hexdigest(), f)
+            archFile = list(uniqByHash.values())
             if len(archFile) == UtilityWS.EMPTY_BUFFER:
                 # Missing XSA makes the platform unusable for check-in.
                 LOG(f"Platform \"{item}\" has no discoverable xsa file; "
