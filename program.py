@@ -13,6 +13,8 @@ Examples:
     _vitis.bat -v 2025.2 -s .\\program.py --elf-only
     _vitis.bat -v 2025.2 -s .\\program.py --build --elf-only --watch
     _vitis.bat -v 2025.2 -s .\\program.py --dry-run
+    _vitis.bat -v 2025.2 -s .\\program.py --reset-cpu
+    _vitis.bat -v 2025.2 -s .\\program.py --reset-ps
 """
 import argparse
 import glob
@@ -56,6 +58,11 @@ FAMILIES = {
 }
 PMU_GATE_REG = 0xFFCA0038
 PMU_GATE_MASK = 0x1C0
+# Register writes that reset only the PS (the PL is kept), per family
+PS_RESET_WRITES = {
+    "zynqmp": [(0xFF5E0218, 0x10)],
+    "zynq": [(0xF8000008, 0xDF0D), (0xF8000200, 0x1)],
+}
 APU_FILTER = 'name =~ "APU*"'
 PSU_FILTER = 'name =~ "PSU*"'
 POLL_TRIES = 1000
@@ -464,6 +471,39 @@ class Programmer:
             elif self.step("con"):
                 self.session.con()
 
+    def reset_ps(self):
+        """@Description Reset only the PS (not the PL) by writing the family PS reset registers."""
+        if self.session is None and not self.args.dry_run:
+            self.connect()
+        self.select(PSU_FILTER if self.fam["pmu_gate"] else APU_FILTER)
+        writes = PS_RESET_WRITES[self.plan["family"]]
+        for idx, (addr, value) in enumerate(writes):
+            if not self.step(f"mwr {addr:#x} {value:#x}"):
+                continue
+            try:
+                self.session.mwr(addr, "-f", words=value)
+            except Exception as err:
+                # The JTAG DAP drops while the PS resets, so the final write may report an error
+                if idx != len(writes) - 1:
+                    raise
+                LOG(f"Last write reported an error, expected while the PS resets: {err}")
+        if not self.args.dry_run:
+            LOG(f"Waiting {SYSTEM_RESET_SETTLE_S}s for the PS to come back")
+            sleep(SYSTEM_RESET_SETTLE_S)
+        LOG("Done")
+
+    def reset_processor(self):
+        """@Description Reset only the processor core(s), no download and no PS/PL changes."""
+        if self.session is None and not self.args.dry_run:
+            self.connect()
+        cores = [self.args.core] if self.args.core else \
+            list(dict.fromkeys(e["core"] for e in self.plan["elfs"]))
+        for core in cores:
+            self.select(core_filter(core))
+            if self.step("rst -processor"):
+                self.session.rst(type="processor")
+        LOG("Done")
+
     def program(self, elf_only):
         """
         @Description Run the programming sequence.
@@ -601,6 +641,10 @@ def main():
     parser.add_argument("--config", help="Launch configuration name (default: first).")
     parser.add_argument("--elf-only", action="store_true",
                         help="Only reset the core, download the ELF and run it.")
+    parser.add_argument("--reset-cpu", action="store_true",
+                        help="Only reset the processor core(s) and exit.")
+    parser.add_argument("--reset-ps", action="store_true",
+                        help="Only reset the PS (the PL is kept) and exit.")
     parser.add_argument("--no-reset", action="store_true", help="Skip the system reset.")
     parser.add_argument("--no-bitstream", action="store_true", help="Skip the bitstream.")
     parser.add_argument("--no-init", action="store_true", help="Skip the PS initialization.")
@@ -651,13 +695,19 @@ def main():
         plan = load_plan(ws, args)
         if args.build and not args.dry_run:
             build_app(ws, plan["app"])
-        if not args.list_targets:
+        if not args.list_targets and not (args.reset_cpu or args.reset_ps):
             check_files(plan, args)
         prog = Programmer(plan, args)
         prog.connect()
         if args.list_targets:
             if prog.session:
                 prog.session.targets()
+            return 0
+        if args.reset_ps:
+            prog.reset_ps()
+            return 0
+        if args.reset_cpu:
+            prog.reset_processor()
             return 0
         prog.program(elf_only=args.elf_only)
         if args.watch and not args.dry_run:

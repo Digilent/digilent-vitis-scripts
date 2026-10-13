@@ -156,6 +156,10 @@ Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` fi
 
    `<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py --dry-run` (print the steps only)
 
+   `<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py --reset-ps` (reset the PS only, the PL is kept)
+
+   `<path-to-scripts-repo>\_vitis.bat -v <version> -s program.py --reset-cpu` (reset only the processor core(s); `--core` selects one)
+
 4. Output:
 
    * The terminal shows the programming steps and errors.
@@ -241,7 +245,7 @@ Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` fi
 **`program.py` flags** (combinable):
 
 * Selection: `--ws <path>`, `--app <app-name>`, `--config <name>` (launch configuration).
-* Steps: `--elf-only`, `--no-reset`, `--no-bitstream`, `--no-init`, `--no-run`,
+* Steps: `--reset-ps` (PS reset only), `--reset-cpu` (processor reset only), `--elf-only`, `--no-reset`, `--no-bitstream`, `--no-init`, `--no-run`,
   `--stop-at-entry`.
 * PS init mode: `--psu-init` (alias `--ps7-init`, `--ps-init`) or `--fsbl`; default from `launch.json`.
 * Overrides: `--family {zynq,zynqmp}`, `--elf`, `--core`, `--bit`, `--xsa`, `--init-tcl`,
