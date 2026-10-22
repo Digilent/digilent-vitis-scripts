@@ -126,6 +126,9 @@ class _BuildWatchdog:
     @Description
     Monitor quiet builds and log hang diagnostics.
     """
+    POLL_INTERVAL_SEC = 30
+    # Workspace inactivity (no file writes) after which a hang is assumed.
+    STALL_SEC = 120
     WARN_INTERVAL_SEC = 180
 
     def __init__(self, desc, ws_path="", auto_recover=False):
@@ -174,19 +177,21 @@ class _BuildWatchdog:
         return latest
 
     def _run(self) -> None:
-        """Poll for silent hangs and optionally trigger recovery."""
-        elapsedSec = 0
-        while not self._stopEvent.wait(self.WARN_INTERVAL_SEC):
-            elapsedSec += self.WARN_INTERVAL_SEC
+        """Poll for stalled builds and optionally trigger recovery."""
+        startTime = time.time()
+        lastNotice = startTime
+        while not self._stopEvent.wait(self.POLL_INTERVAL_SEC):
             now = time.time()
+            elapsedSec = int(now - startTime)
             latestMtime = self._mostRecentMtime(self._wsPath) if self._wsPath else None
-            if latestMtime is not None and (now - latestMtime) < self.WARN_INTERVAL_SEC:
-                LOG(f"Still building {self._desc}: no console output for over "
-                   f"{elapsedSec // 60} minute(s), but files under the workspace "
-                   f"were last modified {int(now - latestMtime)}s ago - Vitis's own "
-                   "progress output is mostly filtered out (see quietBuild), so this "
-                   "is expected for a big/slow build step, not a hang.")
+            if latestMtime is not None and (now - latestMtime) < self.STALL_SEC:
+                if now - lastNotice >= self.WARN_INTERVAL_SEC:
+                    lastNotice = now
+                    LOG(f"Still building {self._desc} ({elapsedSec // 60} minute(s)): files "
+                       f"under the workspace were last modified {int(now - latestMtime)}s ago "
+                       "- expected for a big/slow build step, not a hang.")
                 continue
+            elapsedSec = int(now - max(startTime, latestMtime or startTime))
             try:
                 vitisRoot = environ.get("XILINX_VITIS", "")
                 allProcs = listVitisProcesses(vitisRoot)
@@ -1093,7 +1098,7 @@ class Workspace:
         """Build one platform and return the client to keep using."""
         watchdog = _BuildWatchdog(f"platform \"{plt['name']}\"", self._wsPath, auto_recover=True)
         LOG(f"Building platform \"{plt['name']}\": the Vitis gRPC server may block here; if there "
-           f"is no output and no workspace activity for ~{_BuildWatchdog.WARN_INTERVAL_SEC // 60} "
+           f"is no workspace activity for ~{_BuildWatchdog.STALL_SEC // 60} "
            "minute(s), Vitis will be reset automatically and the platform retried once.")
         try:
             with watchdog:
@@ -1108,17 +1113,7 @@ class Workspace:
                "platform once (AUTOMATIC RESET, no action needed)...")
 
         # Recovery left a stale lock behind; clear it before retrying.
-        lock_path = path.join(self._wsPath, "_ide", ".wsdata", ".lock")
-        if path.isfile(lock_path):
-            try:
-                remove(lock_path)
-            except OSError as lock_err:
-                LOG(f"Failed to remove stale workspace lock file {lock_path} "
-                   f"after recovery: {lock_err}")
-
-        dispose()
-        client = create_client()
-        self._setWorkspaceWithRetry(client, self._wsPath)
+        client = self._restartVitisSession()
         # Remove partial components from the failed attempt.
         existing = {c["name"] for c in client.list_components()}
         for stale_name in (plt["name"], f"{plt['name']}_FSBL"):
@@ -1130,6 +1125,55 @@ class Workspace:
         with _BuildWatchdog(f"platform \"{plt['name']}\" (retry)", self._wsPath):
             self._buildPlatformImpl(client, xsa_path, plt, repo_path)
         return client
+
+    def _restartVitisSession(self):
+        """Clear the stale workspace lock and return a client on a fresh Vitis session."""
+        lock_path = path.join(self._wsPath, "_ide", ".wsdata", ".lock")
+        if path.isfile(lock_path):
+            try:
+                remove(lock_path)
+            except OSError as lock_err:
+                LOG(f"Failed to remove stale workspace lock file {lock_path} "
+                   f"after recovery: {lock_err}")
+
+        dispose()
+        client = create_client()
+        self._setWorkspaceWithRetry(client, self._wsPath)
+        return client
+
+    def _buildAppWithRecovery(self, client, app_name, hw_platforms, repo_root, rebuild):
+        """
+        @Description
+        Build one application; on a detected hang, reset Vitis and retry once
+        from a fresh component.
+
+        @Returns
+        Tuple (client to keep using, build result).
+        """
+        def attempt(cl, reuse):
+            if reuse:
+                self._rebuildApplicationInPlace(cl, app_name, repo_root)
+                return True
+            return self._buildApplication(cl, app_name, hw_platforms, repo_root)
+
+        watchdog = _BuildWatchdog(f"application \"{app_name}\"", self._wsPath, auto_recover=True)
+        try:
+            with watchdog:
+                return client, attempt(client, rebuild)
+        except Exception as e:
+            if not watchdog.killedForRecovery:
+                raise
+            LOG(f"Application \"{app_name}\" build failed ({e}) after this run's "
+               "own Vitis backend was force-stopped for a detected hang; starting a "
+               "fresh Vitis session and retrying this application once "
+               "(AUTOMATIC RESET, no action needed)...")
+
+        client = self._restartVitisSession()
+        if app_name in {c["name"] for c in client.list_components()}:
+            LOG(f"Deleting partially-built component \"{app_name}\" before retry...")
+            client.delete_component(name=app_name)
+        with _BuildWatchdog(f"application \"{app_name}\" (retry)", self._wsPath):
+            return client, attempt(client, False)
 
     def _buildPlatformImpl(self, client, xsa_path, plt, repo_path) -> None:
         """
@@ -1154,7 +1198,7 @@ class Workspace:
         platform = client.create_platform_component(**platform_kwargs)
         if platform is None:
             raise Exception(f"Platform \"{name}\" creation returned no result - "
-                             "likely interrupted (e.g. Ctrl+C) or failed silently "
+                             "likely interrupted (e.g. Ctrl+C) or failed without an error "
                              f"during the build; see {self._buildLogPath or 'the console output above'}.")
         platform.update_desc(desc=name)
         self._writePlatformSourceDirManifest(platform, plt["hw_pf_dir"])
@@ -1395,7 +1439,7 @@ class Workspace:
             LOG(f"Application \"{app_name}\" was checked in with OS "
                f"\"{app_os}\", which checkout.py cannot rebuild (only "
                f"\"standalone\" bare-metal domains are reconstructed); "
-               f"refusing to silently rebuild it against a \"standalone\" "
+               f"refusing to rebuild it without notice against a \"standalone\" "
                f"domain instead.")
             return None
         target_proc = self.getAppTargetProc(app_name, filepath=comp_settings_path)
@@ -1759,12 +1803,15 @@ class Workspace:
                     all_apps_resolved = False
                     continue
                 if incremental and app_name in existing:
-                    self._rebuildApplicationInPlace(client, app_name, repo_root)
+                    client, _ok = self._buildAppWithRecovery(
+                        client, app_name, hw_platforms, repo_root, True)
                 else:
                     if app_name in existing:
                         LOGD(f"Deleting existing application component \"{app_name}\" for rebuild...")
                         client.delete_component(name=app_name)
-                    if not self._buildApplication(client, app_name, hw_platforms, repo_root):
+                    client, ok = self._buildAppWithRecovery(
+                        client, app_name, hw_platforms, repo_root, False)
+                    if not ok:
                         all_apps_resolved = False
 
             if not all_apps_resolved:
