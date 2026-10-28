@@ -17,7 +17,7 @@ import shutil
 from re import (search, compile, RegexFlag)
 from json import JSONDecoder
 from os import (path, walk, listdir, remove,
-                sep, makedirs, chmod, environ)
+                sep, makedirs, chmod, environ, _exit)
 from stat import S_IWRITE
 from tempfile import mkdtemp
 from hashlib import sha256
@@ -130,6 +130,8 @@ class _BuildWatchdog:
     # Workspace inactivity (no file writes) after which a hang is assumed.
     STALL_SEC = 120
     WARN_INTERVAL_SEC = 180
+    # Time a blocked call gets to return after its backend was killed.
+    ABORT_GRACE_SEC = 90
 
     def __init__(self, desc, ws_path="", auto_recover=False):
         """Initialize the watchdog state."""
@@ -184,14 +186,16 @@ class _BuildWatchdog:
             now = time.time()
             elapsedSec = int(now - startTime)
             latestMtime = self._mostRecentMtime(self._wsPath) if self._wsPath else None
-            if latestMtime is not None and (now - latestMtime) < self.STALL_SEC:
+            # Activity older than this watchdog does not count.
+            lastActivity = max(startTime, latestMtime or startTime)
+            if (now - lastActivity) < self.STALL_SEC:
                 if now - lastNotice >= self.WARN_INTERVAL_SEC:
                     lastNotice = now
-                    LOG(f"Still building {self._desc} ({elapsedSec // 60} minute(s)): files "
-                       f"under the workspace were last modified {int(now - latestMtime)}s ago "
-                       "- expected for a big/slow build step, not a hang.")
+                    LOG(f"Still working on {self._desc} ({elapsedSec // 60} minute(s)): "
+                       f"last workspace activity {int(now - lastActivity)}s ago "
+                       "- expected for a big/slow step, not a hang.")
                 continue
-            elapsedSec = int(now - max(startTime, latestMtime or startTime))
+            elapsedSec = int(now - lastActivity)
             try:
                 vitisRoot = environ.get("XILINX_VITIS", "")
                 allProcs = listVitisProcesses(vitisRoot)
@@ -202,17 +206,26 @@ class _BuildWatchdog:
             except Exception as e:
                 ownProcs = []
                 staleDesc = ownDesc = f"unavailable ({e})"
-            if self._autoRecover and ownProcs:
-                LOG(f"WARNING: building {self._desc} has shown no console output AND no "
-                   f"workspace file activity for over {elapsedSec // 60} minute(s) - this "
-                   "looks like a genuine hang, not just a slow build. Force-stopping this "
-                   f"run's own stuck Vitis backend ({ownDesc}) to attempt automatic "
-                   "recovery (a single retry in a fresh Vitis session)...")
-                stopped = stopVitisProcessesByPid(ownProcs)
+            if self._autoRecover and (ownProcs or staleProcs):
+                LOG(f"WARNING: {self._desc} has shown no workspace file activity for over "
+                   f"{elapsedSec // 60} minute(s) - looks like a genuine hang. "
+                   f"Force-stopping this run's Vitis backend ({ownDesc}) and leftover "
+                   f"process(es) from earlier runs/resets ({staleDesc}) to recover...")
+                stopped = stopVitisProcessesByPid(ownProcs + staleProcs)
                 self.killedForRecovery = True
-                LOG(f"Stopped process(es) {stopped} for recovery; waiting for the "
-                   "interrupted build call to return control...")
+                LOG(f"Stopped process(es) {stopped}; waiting for the blocked call to return...")
+                # A gRPC call without deadline may never notice its backend died.
+                if not self._stopEvent.wait(self.ABORT_GRACE_SEC):
+                    LOG(f"ERROR: blocked call for {self._desc} did not return "
+                       f"{self.ABORT_GRACE_SEC}s after its backend was stopped; aborting. "
+                       "Re-run checkout (--selective resumes).")
+                    sys.stdout.flush()
+                    _exit(1)
                 return
+            if self._autoRecover:
+                LOG(f"WARNING: {self._desc} appears hung but no Vitis process was found "
+                   "to stop.")
+                continue
             LOG(f"WARNING: building {self._desc} has shown no console output AND no "
                f"workspace file activity for over {elapsedSec // 60} minute(s) - this "
                "looks like a genuine hang, not just a slow build. Leftover process(es) "
@@ -1096,35 +1109,53 @@ class Workspace:
 
     def _buildPlatform(self, client, xsa_path, plt, repo_path):
         """Build one platform and return the client to keep using."""
-        watchdog = _BuildWatchdog(f"platform \"{plt['name']}\"", self._wsPath, auto_recover=True)
         LOG(f"Building platform \"{plt['name']}\": the Vitis gRPC server may block here; if there "
            f"is no workspace activity for ~{_BuildWatchdog.STALL_SEC // 60} "
-           "minute(s), Vitis will be reset automatically and the platform retried once.")
-        try:
-            with watchdog:
-                self._buildPlatformImpl(client, xsa_path, plt, repo_path)
-            return client
-        except Exception as e:
-            if not watchdog.killedForRecovery:
-                raise
-            LOG(f"Platform \"{plt['name']}\" build failed ({e}) after this run's "
-               "own Vitis backend was force-stopped for a detected genuine "
-               "hang; starting a fresh Vitis session and retrying this "
-               "platform once (AUTOMATIC RESET, no action needed)...")
+           f"minute(s), Vitis is reset automatically (up to {self.MAX_RESETS} times).")
+        return self._runWithResets(
+            client, f"platform \"{plt['name']}\"",
+            lambda cl: self._buildPlatformImpl(cl, xsa_path, plt, repo_path),
+            (plt["name"], f"{plt['name']}_FSBL"))
 
-        # Recovery left a stale lock behind; clear it before retrying.
-        client = self._restartVitisSession()
-        # Remove partial components from the failed attempt.
+    # Automatic Vitis resets allowed per build step before aborting.
+    MAX_RESETS = 3
+
+    def _runWithResets(self, client, desc, work, stale_names):
+        """
+        @Description
+        Run work(client) under the watchdog; on a detected hang reset Vitis,
+        delete partial components and retry, up to MAX_RESETS times.
+        The reset itself is watched too, as it can block on gRPC as well.
+
+        @Returns
+        The client to keep using.
+        """
+        for attempt in range(self.MAX_RESETS + 1):
+            label = desc if attempt == 0 else f"{desc} (retry {attempt})"
+            watchdog = _BuildWatchdog(label, self._wsPath, auto_recover=True)
+            try:
+                with watchdog:
+                    if attempt:
+                        client = self._restartVitisSession()
+                        self._deleteComponents(client, stale_names)
+                    work(client)
+                return client
+            except Exception as e:
+                if not watchdog.killedForRecovery:
+                    raise
+                LOG(f"{label} failed ({e}) after its Vitis backend was force-stopped "
+                   f"for a detected hang (AUTOMATIC RESET {attempt + 1}/{self.MAX_RESETS})...")
+        raise Exception(f"{desc} kept hanging after {self.MAX_RESETS} automatic Vitis "
+                        "resets. Check the Vitis install/XSA and re-run checkout.")
+
+    @staticmethod
+    def _deleteComponents(client, names) -> None:
+        """Delete partially-built components left by a failed attempt."""
         existing = {c["name"] for c in client.list_components()}
-        for stale_name in (plt["name"], f"{plt['name']}_FSBL"):
-            if stale_name in existing:
-                LOG(f"Deleting partially-built component \"{stale_name}\" before retry...")
-                client.delete_component(name=stale_name)
-
-        # Do not auto-recover again on the retry.
-        with _BuildWatchdog(f"platform \"{plt['name']}\" (retry)", self._wsPath):
-            self._buildPlatformImpl(client, xsa_path, plt, repo_path)
-        return client
+        for name in names:
+            if name in existing:
+                LOG(f"Deleting partially-built component \"{name}\" before retry...")
+                client.delete_component(name=name)
 
     def _restartVitisSession(self):
         """Clear the stale workspace lock and return a client on a fresh Vitis session."""
@@ -1156,24 +1187,17 @@ class Workspace:
                 return True
             return self._buildApplication(cl, app_name, hw_platforms, repo_root)
 
-        watchdog = _BuildWatchdog(f"application \"{app_name}\"", self._wsPath, auto_recover=True)
-        try:
-            with watchdog:
-                return client, attempt(client, rebuild)
-        except Exception as e:
-            if not watchdog.killedForRecovery:
-                raise
-            LOG(f"Application \"{app_name}\" build failed ({e}) after this run's "
-               "own Vitis backend was force-stopped for a detected hang; starting a "
-               "fresh Vitis session and retrying this application once "
-               "(AUTOMATIC RESET, no action needed)...")
+        result = []
+        reuse = [rebuild]
 
-        client = self._restartVitisSession()
-        if app_name in {c["name"] for c in client.list_components()}:
-            LOG(f"Deleting partially-built component \"{app_name}\" before retry...")
-            client.delete_component(name=app_name)
-        with _BuildWatchdog(f"application \"{app_name}\" (retry)", self._wsPath):
-            return client, attempt(client, False)
+        def work(cl):
+            # Retries always start from a fresh component.
+            useNow, reuse[0] = reuse[0], False
+            result[:] = [attempt(cl, useNow)]
+
+        client = self._runWithResets(client, f"application \"{app_name}\"",
+                                     work, (app_name,))
+        return client, result[0]
 
     def _buildPlatformImpl(self, client, xsa_path, plt, repo_path) -> None:
         """
