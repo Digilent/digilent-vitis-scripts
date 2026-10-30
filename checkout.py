@@ -7,7 +7,6 @@ Usage: Vitis projects
 @Description
 Recreate Vitis projects from sw -> src into sw -> ws.
 """
-from vitis import create_client, dispose
 import argparse
 import time
 import sys
@@ -27,7 +26,7 @@ import threading
 import zipfile
 from xml.etree import ElementTree
 from misc import (LOG, LOGD, setLogFile, stopDanglingVitisProcesses, listVitisProcesses,
-                  stopVitisProcessesByPid)
+                  stopVitisProcessesByPid, createVitisClient, disposeVitisClient)
 from contextlib import (contextmanager, ExitStack)
 
 # Source extensions _pruneStaleFiles may prune at an app src top level.
@@ -1167,8 +1166,8 @@ class Workspace:
                 LOG(f"Failed to remove stale workspace lock file {lock_path} "
                    f"after recovery: {lock_err}")
 
-        dispose()
-        client = create_client()
+        disposeVitisClient()
+        client = createVitisClient(path.join(self._wsPath, "checkout_server.log"))
         self._setWorkspaceWithRetry(client, self._wsPath)
         return client
 
@@ -1720,7 +1719,7 @@ class Workspace:
         environ["CFLAGS"] = "-specs=nosys.specs"
         environ["CXXFLAGS"] = "-specs=nosys.specs"
 
-        dispose()
+        disposeVitisClient()
 
         LOG("Checking out Vitis project into the workspace...")
         LOG("Console shows essential messages only. Full details: "
@@ -1728,11 +1727,15 @@ class Workspace:
             f"{path.join(ws_path, 'checkout_build.log')} (Vitis builds, incl. warnings).")
         outputStack = ExitStack()
         try:
-            client = create_client()
             if selective:
+                makedirs(ws_path, exist_ok=True)
+                client = createVitisClient(path.join(ws_path, "checkout_server.log"))
                 self._openExistingWorkspace(client, ws_path)
             else:
+                # The wipe cannot delete an open log, so log only after it.
+                client = createVitisClient()
                 self._prepareWorkspace(client, ws_path)
+                client = self._restartVitisSession()
             outputStack.enter_context(self._quietOutput())
             app_names, hw_platforms = self._discoverAppsAndPlatforms(repo_root + f"{sep}src")
             self._extractPlatformMetadata(hw_platforms)
@@ -1846,7 +1849,7 @@ class Workspace:
             return Workspace.SUCCESS
         finally:
             outputStack.close()
-            dispose()
+            disposeVitisClient()
 
     def _getBoundPlatformNames(self, app_names, hw_platforms, repo_root) -> set:
         """

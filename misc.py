@@ -453,6 +453,130 @@ def stopVitisProcessesByPid(procs : list, force : bool = True) -> list:
     return stopped
 
 
+_vitisServer = {"proc": None, "log": None}
+
+
+def _killProcessTree(pid : int) -> None:
+    """@Description Force-stop a process and all its children."""
+    if platform.system() == "Windows":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+    else:
+        import signal
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _startServerProcess(logPath : str, timeoutSec : int = None) -> int:
+    """
+    @Description
+    Start vitis-server ourselves and wait until it accepts connections.
+    The library pipes the server output without ever reading it, which
+    blocks the server once the pipe is full, and its stop() only kills
+    the cmd shell on Windows, leaving the java backend running.
+    @Parameters
+    logPath: file that receives the server output, discarded if empty.
+    timeoutSec: start timeout, default VITIS_SERVER_START_TIMEOUT or 60.
+    @Returns the listening port.
+    """
+    import socket
+    import time
+
+    disposeVitisClient()
+    if timeoutSec is None:
+        timeoutSec = int(os.environ.get("VITIS_SERVER_START_TIMEOUT", "60"))
+    binFile = os.path.join(os.environ["XILINX_VITIS"], "bin", "vitis-server")
+    isWin = platform.system() == "Windows"
+    if isWin:
+        binFile += ".bat"
+    with socket.socket() as sock:
+        sock.bind(("localhost", 0))
+        port = sock.getsockname()[1]
+
+    logFile = open(logPath, "ab") if logPath else None
+    extra = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if isWin
+             else {"start_new_session": True})
+    proc = subprocess.Popen([binFile, "-p", str(port)], stdin=subprocess.DEVNULL,
+                            stdout=logFile or subprocess.DEVNULL,
+                            stderr=subprocess.STDOUT, **extra)
+    _vitisServer.update(proc=proc, log=logFile)
+
+    deadline = time.time() + timeoutSec
+    while True:
+        if proc.poll() is not None:
+            disposeVitisClient()
+            raise Exception(f"vitis-server exited with code {proc.returncode} "
+                            f"before accepting connections (log: {logPath or 'none'})")
+        try:
+            socket.create_connection(("localhost", port), timeout=1).close()
+            return port
+        except OSError:
+            if time.time() > deadline:
+                disposeVitisClient()
+                raise Exception(f"vitis-server did not listen on port {port} "
+                                f"within {timeoutSec}s (log: {logPath or 'none'})")
+            time.sleep(0.5)
+
+
+def _attachToOwnServer(factory, port : int):
+    """@Description Run factory(port) so the library attaches to our server instead of spawning one."""
+    from vitis import _server
+    origStart = _server.Server.startServer
+    _server.Server.startServer = lambda self: setattr(self, "cp", None) or True
+    try:
+        return factory(port)
+    except Exception:
+        disposeVitisClient()
+        raise
+    finally:
+        _server.Server.startServer = origStart
+
+
+def createVitisClient(logPath : str = "", timeoutSec : int = None):
+    """
+    @Description Start our own vitis-server and return a stock vitis client attached to it.
+    @Parameters
+    logPath: file that receives the server output.
+    timeoutSec: server start timeout.
+    @Returns the vitis client object.
+    """
+    from vitis import create_client
+    port = _startServerProcess(logPath, timeoutSec)
+    return _attachToOwnServer(lambda p: create_client(port=p), port)
+
+
+def createVitisServer(workspace : str, logPath : str = "", timeoutSec : int = None):
+    """
+    @Description Start our own vitis-server and return a vitis _server.Server attached to it.
+    @Parameters
+    workspace: workspace path to select.
+    logPath: file that receives the server output.
+    timeoutSec: server start timeout.
+    @Returns the vitis _server.Server object.
+    """
+    from vitis import _server
+    port = _startServerProcess(logPath, timeoutSec)
+    return _attachToOwnServer(
+        lambda p: _server.Server(port=p, host="localhost", workspace=workspace), port)
+
+
+def disposeVitisClient() -> None:
+    """@Description Drop the vitis client and kill the server we started, with its children."""
+    from vitis import dispose
+    dispose()
+    proc, logFile = _vitisServer["proc"], _vitisServer["log"]
+    _vitisServer.update(proc=None, log=None)
+    if proc is not None:
+        _killProcessTree(proc.pid)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    if logFile is not None:
+        logFile.close()
+
+
 def updatePlatformXsa(platformComp, xsaPath : str) -> bool:
     """
     @Description Update a platform component to use a new XSA.

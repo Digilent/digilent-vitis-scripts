@@ -554,14 +554,14 @@ def build_app(ws, app):
     ws: Workspace folder.
     app: App component name.
     """
-    from vitis import create_client, dispose
-    client = create_client()
+    from misc import createVitisClient, disposeVitisClient
+    client = createVitisClient(path.join(ws, "program_server.log"))
     try:
         client.set_workspace(ws)
         LOG(f"Building {app}")
         client.get_component(name=app).build()
     finally:
-        dispose()
+        disposeVitisClient()
 
 
 class LogOut:

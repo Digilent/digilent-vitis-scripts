@@ -17,7 +17,7 @@ from json import (JSONEncoder, JSONDecoder)
 from re import (compile, escape, RegexFlag)
 from hashlib import sha256
 from sys import exit as sys_exit
-from misc import (LOG, MapCmdLineOpts)
+from misc import (LOG, MapCmdLineOpts, createVitisServer, disposeVitisClient)
 
 class UtilityWS:
     """
@@ -75,11 +75,15 @@ class UtilityWS:
             if UtilityWS.srvCl is None:
                 try:
                     LOG(msg="Local server, starting Vitis server...")
-                    UtilityWS.srvCl = _server.Server(
-                        port=None if self.sPort == "" else self.sPort,
-                        host="localhost" if self.sIP == "" else self.sIP,
-                        workspace=lcWsDir
-                        )
+                    if self.sPort == "" and self.sIP == "":
+                        UtilityWS.srvCl = createVitisServer(
+                            lcWsDir, path.join(lcWsDir, "checkin_server.log"))
+                    else:
+                        UtilityWS.srvCl = _server.Server(
+                            port=None if self.sPort == "" else self.sPort,
+                            host="localhost" if self.sIP == "" else self.sIP,
+                            workspace=lcWsDir
+                            )
                     UtilityWS.IS_DIRS = True
                 except Exception as err:
                     LOG(msg=f"Error Local server: {err.__class__} {err.__context__}")
@@ -515,8 +519,7 @@ class Workspace:
                 # Stop the server on construction-time failures.
                 if UtilityWS.srvCl is not None and not UtilityWS.SET_IP_PORT:
                     LOG("Stopping Vitis server after a construction-time error...")
-                    UtilityWS.srvCl.stop()
-                raise
+                    disposeVitisClient()
 
     def gatherAppSrcCd(self,
                        pSrcFl : str
@@ -782,7 +785,7 @@ class Workspace:
         finally:
             # Stop only the server started by this process.
             if not UtilityWS.SET_IP_PORT:
-                UtilityWS.srvCl.stop()
+                disposeVitisClient()
         return iRet
 
 if __name__ == "__main__":
