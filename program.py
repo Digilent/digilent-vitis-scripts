@@ -663,6 +663,8 @@ def main():
     parser.add_argument("--fsbl-elf", help="FSBL ELF to use instead of the launch.json one.")
     parser.add_argument("--fsbl-exit", help="FSBL symbol to stop at (default: per family).")
     parser.add_argument("--timeout", type=int, default=60, help="FSBL run timeout in seconds.")
+    parser.add_argument("--server-timeout", type=int, metavar="SEC",
+                        help="Vitis server idle shutdown timeout in seconds, 0 (default) never.")
     parser.add_argument("--cable", help="JTAG cable name substring, when several are connected.")
     parser.add_argument("--host", default="127.0.0.1", help="hw_server host.")
     parser.add_argument("--port", type=int, default=3121, help="hw_server port.")
@@ -675,6 +677,8 @@ def main():
     args = parser.parse_args()
     if args.fsbl and args.psu_init:
         parser.error("--fsbl and --psu-init are exclusive")
+    from misc import setServerTimeout
+    setServerTimeout(args.server_timeout)
 
     # connect() auto-starts hw_server by name, so the Vitis bin dir must be on PATH
     vitis_bin = path.join(environ.get("XILINX_VITIS", ""), "bin")

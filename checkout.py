@@ -26,7 +26,8 @@ import threading
 import zipfile
 from xml.etree import ElementTree
 from misc import (LOG, LOGD, setLogFile, stopDanglingVitisProcesses, listVitisProcesses,
-                  stopVitisProcessesByPid, createVitisClient, disposeVitisClient)
+                  stopVitisProcessesByPid, createVitisClient, disposeVitisClient,
+                  setServerTimeout)
 from contextlib import (contextmanager, ExitStack)
 
 # Source extensions _pruneStaleFiles may prune at an app src top level.
@@ -1945,7 +1946,12 @@ if __name__ == "__main__":
         "--psu-init", action="store_true",
         help="Launch configs initialize the PS with psu_init.tcl instead of the FSBL."
         )
+    parser.add_argument(
+        "--server-timeout", type=int, default=None, metavar="SEC",
+        help="Vitis server idle shutdown timeout in seconds, 0 (default) never."
+        )
     args = parser.parse_args()
+    setServerTimeout(args.server_timeout)
 
     lcWs = Workspace()
     iRet = lcWs.checkOutSF(

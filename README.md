@@ -234,6 +234,7 @@ Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` fi
 * `--skip-unbound-platforms`: skip platforms no app references.
 * `--incremental`: rebuild in place; only with `--platform`/`--app`.
 * `--allow-process-cleanup`: allow stopping pre-existing Vitis processes.
+* `--server-timeout <s>`: Vitis server idle shutdown timeout in seconds; default `0` (never).
 * `-y`/`--assume-yes`: skip the wipe confirmation prompt (CI/unattended).
 * `--esw-repo <path>`: custom embeddedsw checkout; default is the one bundled with Vitis.
 
@@ -241,6 +242,7 @@ Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` fi
 
 * `--port <port-number>`: Vitis server port; auto-selected if omitted.
 * `--ip <ip-address>`: Vitis server host; defaults to localhost.
+* `--server-timeout <s>`: Vitis server idle shutdown timeout in seconds; default `0` (never).
 
 **`program.py` flags** (combinable):
 
@@ -250,7 +252,7 @@ Vitis Unified IDE. It reads `ws\<app>\_ide\launch.json`, so run `checkout.py` fi
 * PS init mode: `--psu-init` (alias `--ps7-init`, `--ps-init`) or `--fsbl`; default from `launch.json`.
 * Overrides: `--family {zynq,zynqmp}`, `--elf`, `--core`, `--bit`, `--xsa`, `--init-tcl`,
   `--fsbl-elf`, `--fsbl-exit`.
-* Connection: `--cable <name-substring>`, `--host`, `--port`, `--timeout <s>` (FSBL run).
+* Connection: `--cable <name-substring>`, `--host`, `--port`, `--timeout <s>` (FSBL run), `--server-timeout <s>` (Vitis server idle shutdown with `--build`; default `0` = never).
 * Extras: `--build` (rebuild the app in `ws` first; it does not sync `src` like `checkout.py`),
   `--watch` (reprogram the ELF when it changes),
   `--list-targets`, `--dry-run`, `--log <file>`.

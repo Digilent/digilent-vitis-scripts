@@ -50,7 +50,11 @@ def MapCmdLineOpts(opt=OPT_CHECKIN, kwCLO={}):
                                 "Checkin options")
         parser.add_argument(f"{lsEntries[0]}", type=int, help="Server's port number")
         parser.add_argument(f"{lsEntries[1]}", type=str, help="Server's ip or localhost")
+        parser.add_argument("--server-timeout", type=int, metavar="SEC",
+                            help="Vitis server idle shutdown timeout in seconds, 0 (default) never.")
         args = parser.parse_args()
+        if args.server_timeout is not None:
+            setServerTimeout(args.server_timeout)
         for idx in range(0, len(lsEntries)):
             sTmp = lsEntries[idx][2:]
             attr = getattr(args, sTmp)
@@ -468,7 +472,22 @@ def _killProcessTree(pid : int) -> None:
             pass
 
 
-def _startServerProcess(logPath : str, timeoutSec : int = None) -> int:
+_serverIdleSec = 0
+
+def setServerTimeout(idleSec : int = None) -> None:
+    """
+    @Description
+    Set the vitis-server idle shutdown timeout (its -t option) used when no
+    explicit idleSec is given. The server stops after this many seconds
+    without a client connection, which breaks long single-call operations.
+    @Parameters
+    idleSec: seconds, 0 never shuts the server down; None restores 0.
+    """
+    global _serverIdleSec
+    _serverIdleSec = 0 if idleSec is None else idleSec
+
+
+def _startServerProcess(logPath : str, timeoutSec : int = None, idleSec : int = None) -> int:
     """
     @Description
     Start vitis-server ourselves and wait until it accepts connections.
@@ -478,12 +497,15 @@ def _startServerProcess(logPath : str, timeoutSec : int = None) -> int:
     @Parameters
     logPath: file that receives the server output, discarded if empty.
     timeoutSec: start timeout, default VITIS_SERVER_START_TIMEOUT or 60.
+    idleSec: server idle shutdown timeout, default --server-timeout or 0 (never).
     @Returns the listening port.
     """
     import socket
     import time
 
     disposeVitisClient()
+    if idleSec is None:
+        idleSec = _serverIdleSec
     if timeoutSec is None:
         timeoutSec = int(os.environ.get("VITIS_SERVER_START_TIMEOUT", "60"))
     binFile = os.path.join(os.environ["XILINX_VITIS"], "bin", "vitis-server")
@@ -497,7 +519,7 @@ def _startServerProcess(logPath : str, timeoutSec : int = None) -> int:
     logFile = open(logPath, "ab") if logPath else None
     extra = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if isWin
              else {"start_new_session": True})
-    proc = subprocess.Popen([binFile, "-p", str(port)], stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen([binFile, "-p", str(port), "-t", str(idleSec)], stdin=subprocess.DEVNULL,
                             stdout=logFile or subprocess.DEVNULL,
                             stderr=subprocess.STDOUT, **extra)
     _vitisServer.update(proc=proc, log=logFile)
